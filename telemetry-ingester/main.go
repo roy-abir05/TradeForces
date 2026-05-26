@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -27,6 +29,37 @@ func main() {
 
 	fmt.Println("[Telemetry Ingester] Referee is online. Waiting for Redpanda data...")
 
+	var latenciesChan chan int64 = make(chan int64, 10000)
+
+	go readKafka(kafkaReader, latenciesChan)
+
+	ticker := time.NewTicker(time.Second)
+	var currentWindow []int64
+
+	for {
+		select{
+		case lat := <-latenciesChan:
+			currentWindow = append(currentWindow, lat)
+		case <- ticker.C:
+			if len(currentWindow)==0{
+				continue
+			}
+			slices.Sort(currentWindow)
+			var requests int64 = int64(len(currentWindow))
+			var tps int64 = requests
+			var p50, p90, p99 int64
+			p50 = currentWindow[int64(float64(requests)*0.5) - 1]
+			p90 = currentWindow[int64(float64(requests)*0.9) - 1]
+			p99 = currentWindow[int64(float64(requests)*0.99) - 1]
+
+			fmt.Printf("[Telemetry Ingester: 1s TICK] TPS: %d | p50: %dµs | p90: %dµs | p99: %dµs\n", tps, p50/1000, p90/1000, p99/1000)
+
+			currentWindow = nil
+		}
+	}
+}
+
+func readKafka(kafkaReader *kafka.Reader, latenciesChan chan int64){
 	for {
 		msg, err := kafkaReader.ReadMessage(context.Background())
 		if err != nil {
@@ -41,6 +74,6 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("Worker Id = %s, Latency = %f\n", string(msg.Key), float64(record.LatencyNs)/1e6)
+		latenciesChan <- record.LatencyNs
 	}
 }
