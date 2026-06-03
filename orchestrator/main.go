@@ -6,13 +6,20 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )
 
-func main() {
+func deployHandler(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	ctx := context.Background()
 
 	apiClient, err := client.New(client.FromEnv)
@@ -82,4 +89,10 @@ func main() {
 	}
 
 	fmt.Printf("[Orchestrator] SUCCESS! Engine is running in Sandbox ID: %s\n", resp.ID[:12])
+}
+
+func main() {
+	http.HandleFunc("/deploy", deployHandler)
+	fmt.Println("[Orchestrator] Microservice listening on http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

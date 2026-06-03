@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { writeFile } from "fs/promises";
+import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 
 export async function POST(request: Request) {
@@ -24,13 +24,21 @@ export async function POST(request: Request) {
       "submissions",
       "user_123",
     );
+    await mkdir(submissionDir, { recursive: true });
 
     const filePath = path.join(submissionDir, "server.cpp");
 
     await writeFile(filePath, buffer);
     console.log(`[API] Successfully wrote submission to ${filePath}`);
 
-    //  Go orchestrator trigger
+    console.log("[Next.js API] Signaling Orchestrator to boot...");
+    const orchestratorRes = await fetch("http://localhost:8080/deploy", {
+      method: "POST",
+    });
+
+    if (!orchestratorRes.ok) {
+        throw new Error("Go Orchestrator failed to boot container");
+    }
 
     return NextResponse.json({
       success: true,
