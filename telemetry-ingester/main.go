@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"slices"
+	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -16,64 +19,100 @@ type TelemetryRecord struct {
 	Status    string `json:"status"`
 }
 
+type LiveMetrics struct {
+	TPS int64 `json:"tps"`
+	P50 int64 `json:"p50"`
+	P90 int64 `json:"p90"`
+	P99 int64 `json:"p99"`
+}
+
+var (
+	clients   = make(map[*websocket.Conn]bool)
+	clientsMu sync.Mutex
+	upgrader  = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+)
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[Referee] WebSocket Upgrade Error: %v", err)
+		return
+	}
+	clientsMu.Lock()
+	clients[ws] = true
+	clientsMu.Unlock()
+	fmt.Println("[Referee] Next.js Server connected to Live Feed.")
+}
+
 func main() {
-	var kafkaReader *kafka.Reader = kafka.NewReader(kafka.ReaderConfig{
+
+	go func() {
+		http.HandleFunc("/ws", wsHandler)
+		log.Fatal(http.ListenAndServe(":8081", nil))
+	}()
+
+	fmt.Println("[Referee] WebSocket Server live on ws://localhost:8081/ws")
+	fmt.Println("[Referee] Waiting for Redpanda data...")
+
+	kafkaReader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:  []string{"localhost:9092"},
 		Topic:    "telemetry",
-		GroupID:  "referee-group", // Setting this enables consumer groups
-		MinBytes: 10e3,            // 10KB
-		MaxBytes: 10e6,            // 10MB
+		GroupID:  "referee-group",
+		MinBytes: 10e3,
+		MaxBytes: 10e6,
 	})
-
 	defer kafkaReader.Close()
 
-	fmt.Println("[Telemetry Ingester] Referee is online. Waiting for Redpanda data...")
-
-	var latenciesChan chan int64 = make(chan int64, 10000)
-
+	latenciesChan := make(chan int64, 10000)
 	go readKafka(kafkaReader, latenciesChan)
 
 	ticker := time.NewTicker(time.Second)
 	var currentWindow []int64
 
 	for {
-		select{
+		select {
 		case lat := <-latenciesChan:
 			currentWindow = append(currentWindow, lat)
-		case <- ticker.C:
-			if len(currentWindow)==0{
+		case <-ticker.C:
+			if len(currentWindow) == 0 {
 				continue
 			}
 			slices.Sort(currentWindow)
-			var requests int64 = int64(len(currentWindow))
-			var tps int64 = requests
-			var p50, p90, p99 int64
-			p50 = currentWindow[int64(float64(requests)*0.5) - 1]
-			p90 = currentWindow[int64(float64(requests)*0.9) - 1]
-			p99 = currentWindow[int64(float64(requests)*0.99) - 1]
+			requests := int64(len(currentWindow))
 
-			fmt.Printf("[Telemetry Ingester: 1s TICK] TPS: %d | p50: %dµs | p90: %dµs | p99: %dµs\n", tps, p50/1000, p90/1000, p99/1000)
+			p50 := currentWindow[int64(float64(requests)*0.5)-1] / 1000
+			p90 := currentWindow[int64(float64(requests)*0.9)-1] / 1000
+			p99 := currentWindow[int64(float64(requests)*0.99)-1] / 1000
+
+			fmt.Printf("[1s TICK] TPS: %d | p50: %dµs | p90: %dµs | p99: %dµs\n", requests, p50, p90, p99)
+
+			metrics := LiveMetrics{TPS: requests, P50: p50, P90: p90, P99: p99}
+
+			clientsMu.Lock()
+			for client := range clients {
+				err := client.WriteJSON(metrics)
+				if err != nil {
+					client.Close()
+					delete(clients, client)
+				}
+			}
+			clientsMu.Unlock()
 
 			currentWindow = nil
 		}
 	}
 }
 
-func readKafka(kafkaReader *kafka.Reader, latenciesChan chan int64){
+func readKafka(kafkaReader *kafka.Reader, latenciesChan chan int64) {
 	for {
 		msg, err := kafkaReader.ReadMessage(context.Background())
 		if err != nil {
-			log.Printf("[Telemetry Ingester] Failed to Read message from Kafka")
 			continue
 		}
-
 		var record TelemetryRecord
-		err = json.Unmarshal(msg.Value, &record)
-		if err != nil {
-			log.Printf("[Telemetry Ingester] Failed to Parse message into json")
-			continue
-		}
-
+		json.Unmarshal(msg.Value, &record)
 		latenciesChan <- record.LatencyNs
 	}
 }
