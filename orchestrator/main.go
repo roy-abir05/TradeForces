@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -39,7 +42,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 
 	io.Copy(os.Stdout, reader)
 
-	hostPath := "/home/abir/Development/demo_iicpc/submissions/user_123"
+	hostPath := "/home/abir/Development/TradeForces/orchestrator/submissions/user_123"
 	containerPath := "/usr/src/app"
 
 	engineConfigJSON := []byte(`{
@@ -89,6 +92,78 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Printf("[Orchestrator] SUCCESS! Engine is running in Sandbox ID: %s\n", resp.ID[:12])
+
+	go func() {
+		targetAddress := "localhost:1337"
+		fmt.Printf("[Orchestrator] Polling %s to detect Engine boot...\n", targetAddress)
+
+		// The Health Check Polling
+		engineReady := false
+		for range 50 {
+			conn, err := net.DialTimeout("tcp", targetAddress, 100*time.Millisecond)
+			if err == nil {
+				conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+				var buf [1]byte
+				_, readErr := conn.Read(buf[:])
+
+				if readErr != nil {
+					if !os.IsTimeout(readErr) {
+						conn.Close()
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+				}
+
+				conn.Close()
+				engineReady = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !engineReady {
+			fmt.Println("[Orchestrator] FATAL: Engine failed to bind to port 1337 within 5 seconds. (Compilation Error?)")
+
+			fmt.Println("\n--- CAGE LOGS ---")
+			logCmd := exec.Command("docker", "logs", resp.ID)
+			logCmd.Stdout = os.Stdout
+			logCmd.Stderr = os.Stderr
+			logCmd.Run()
+			fmt.Println("-----------------\n")
+
+			cleanupCmd := exec.Command("docker", "rm", "-f", resp.ID)
+			if err := cleanupCmd.Run(); err != nil {
+				fmt.Printf("[Orchestrator] Warning: Failed to clean up container: %v\n", err)
+			} else {
+				fmt.Println("[Orchestrator] Sandbox destroyed successfully.")
+			}
+			return
+		}
+
+		fmt.Println("[Orchestrator] Target Lock Acquired. Unleashing the Attack Fleet...")
+
+		cmd := exec.Command("go", "run", "main.go")
+		cmd.Dir = "../load-generator"
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		err := cmd.Run()
+		if err != nil {
+			fmt.Printf("[Orchestrator] Attack Fleet failed: %v\n", err)
+		} else {
+			fmt.Println("[Orchestrator] Attack complete.")
+		}
+
+		fmt.Println("[Orchestrator] Terminating Sandbox...")
+		cleanupCmd := exec.Command("docker", "rm", "-f", resp.ID)
+		if err := cleanupCmd.Run(); err != nil {
+			fmt.Printf("[Orchestrator] Warning: Failed to clean up container: %v\n", err)
+		} else {
+			fmt.Println("[Orchestrator] Sandbox destroyed successfully.")
+		}
+	}()
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Deployed and Attack Initiated"))
 }
 
 func main() {
