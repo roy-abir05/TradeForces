@@ -16,3 +16,19 @@ services:
     ports:
       - "9092:9092"
       - "29092:29092"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: tradeforces-db
+    restart: always
+    environment:
+      POSTGRES_USER: tradeforces
+      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_DB: tradeforces_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
