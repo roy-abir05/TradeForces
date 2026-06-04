@@ -1,48 +1,57 @@
 import { NextResponse } from "next/server";
-import { writeFile, mkdir } from "fs/promises";
-import path from "path";
+import { prisma } from "../../../lib/prisma";
 
 export async function POST(request: Request) {
   try {
     const data = await request.formData();
     const file: File | null = data.get("engine") as unknown as File;
+    const userId = data.get("userId") as string;
 
-    if (!file) {
+    if (!file || !userId) {
       return NextResponse.json(
-        { success: false, error: "No file found" },
+        { success: false, error: "Missing file or user ID" },
         { status: 400 },
       );
     }
 
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
+    const codeString = await file.text();
 
-    const submissionDir = path.join(
-      process.cwd(),
-      "..",
-      "orchestrator",
-      "submissions",
-      "user_123",
+    const submission = await prisma.submission.create({
+      data: {
+        userId: userId,
+        status: "PENDING",
+        filePath: "IN_MEMORY",
+      },
+    });
+
+    console.log(
+      `[Next.js API] Injecting payload to Orchestrator for Submission: ${submission.id}`,
     );
-    await mkdir(submissionDir, { recursive: true });
 
-    const filePath = path.join(submissionDir, "server.cpp");
-
-    await writeFile(filePath, buffer);
-    console.log(`[API] Successfully wrote submission to ${filePath}`);
-
-    console.log("[Next.js API] Signaling Orchestrator to boot...");
     const orchestratorRes = await fetch("http://localhost:8080/deploy", {
       method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+
+      body: JSON.stringify({
+        submissionId: submission.id,
+        code: codeString,
+      }),
     });
 
     if (!orchestratorRes.ok) {
-        throw new Error("Go Orchestrator failed to boot container");
+      await prisma.submission.update({
+        where: { id: submission.id },
+        data: { status: "FAILED" },
+      });
+      throw new Error("Go Orchestrator failed to boot container");
     }
 
     return NextResponse.json({
       success: true,
-      message: "Engine uploaded to Sandbox",
+      message: "Engine payload injected to Sandbox",
+      submissionId: submission.id,
     });
   } catch (error) {
     console.error("[API] Upload failed:", error);
