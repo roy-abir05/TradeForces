@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -172,10 +173,30 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
+		webURL := os.Getenv("WEB_URL")
+		if webURL == "" {
+			webURL = "http://localhost:3000"
+		}
+		resultsEndpoint := webURL + "/api/results"
+
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("[Orchestrator][%s] Load generator failed: %v\n", subID[:8], err)
+
+			failPayload := map[string]string{
+				"submissionId": subID,
+				"status":       "FAILED",
+			}
+			body, _ := json.Marshal(failPayload)
+			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
 		} else {
-			fmt.Printf("[Orchestrator][%s] Attack complete.\n", subID[:8])
+			fmt.Printf("[Orchestrator][%s] Attack complete. Signaling Next.js...\n", subID[:8])
+
+			successPayload := map[string]string{
+				"submissionId": subID,
+				"status":       "SUCCESS",
+			}
+			body, _ := json.Marshal(successPayload)
+			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
 		}
 
 	}(payload.SubmissionID, tempDir, resp.ID)
