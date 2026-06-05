@@ -3,6 +3,15 @@
 import { useState, useEffect } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
 
+interface LeaderboardEntry {
+  id: string;
+  tps: number;
+  p99: number;
+  submission: {
+    user: { name: string; image: string };
+  };
+}
+
 export default function Home() {
   const { data: session, status } = useSession();
 
@@ -11,6 +20,8 @@ export default function Home() {
     "Waiting for engine.cpp...",
   );
   const [metrics, setMetrics] = useState({ tps: 0, p50: 0, p90: 0, p99: 0 });
+
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
 
   // The Polling Loop for Live Metrics
   useEffect(() => {
@@ -35,6 +46,25 @@ export default function Home() {
       setDeployStatus(`Ready to deploy: ${e.target.files[0].name}`);
     }
   };
+
+  // The Polling Loop for Leaderboard
+  useEffect(() => {
+    const fetchLeaderboard = async () => {
+      try {
+        const res = await fetch("/api/leaderboard");
+        if (res.ok) {
+          const data = await res.json();
+          setLeaderboard(data);
+        }
+      } catch (error) {
+        console.error("Failed to fetch leaderboard");
+      }
+    };
+
+    fetchLeaderboard();
+    const interval = setInterval(fetchLeaderboard, 10000); // Refresh every 10s
+    return () => clearInterval(interval);
+  }, []);
 
   const handleDeploy = async () => {
     if (!file || !session) return;
@@ -150,6 +180,44 @@ export default function Home() {
           <MetricCard title="p90 Latency" value={metrics.p90} unit="µs" />
           <MetricCard title="p99 Latency" value={metrics.p99} unit="µs" />
         </div>
+      </div>
+
+      {/* GLOBAL LEADERBOARD */}
+      <div className="max-w-2xl w-full border border-neutral-800 bg-black p-8 rounded-lg mt-8">
+        <h2 className="text-xl font-bold text-white mb-6 border-b border-neutral-800 pb-2">TOP OPERATORS (GLOBAL)</h2>
+        
+        {leaderboard.length === 0 ? (
+          <div className="text-center text-neutral-600 py-4 text-sm">No benchmark data available.</div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {leaderboard.map((entry, index) => (
+              <div key={entry.id} className="flex items-center justify-between bg-neutral-900 p-3 rounded border border-neutral-800 hover:border-green-900 transition-colors">
+                <div className="flex items-center gap-4">
+                  <span className={`font-bold w-6 text-center ${index === 0 ? 'text-yellow-400' : index === 1 ? 'text-gray-400' : index === 2 ? 'text-amber-600' : 'text-neutral-600'}`}>
+                    #{index + 1}
+                  </span>
+                  {entry.submission.user.image ? (
+                    <img src={entry.submission.user.image} alt="avatar" className="w-6 h-6 rounded-full" />
+                  ) : (
+                    <div className="w-6 h-6 rounded-full bg-neutral-700"></div>
+                  )}
+                  <span className="text-white text-sm">{entry.submission.user.name || "Anonymous"}</span>
+                </div>
+                
+                <div className="flex items-center gap-6 text-sm">
+                  <div className="text-right">
+                    <span className="text-neutral-500 text-xs mr-2">TPS</span>
+                    <span className="text-green-400 font-bold">{entry.tps.toLocaleString()}</span>
+                  </div>
+                  <div className="text-right w-20">
+                    <span className="text-neutral-500 text-xs mr-2">p99</span>
+                    <span className="text-white">{entry.p99}µs</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </main>
   );
