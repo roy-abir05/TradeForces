@@ -12,6 +12,18 @@ interface LeaderboardEntry {
   };
 }
 
+interface MySubmission {
+  id: string;
+  status: string;
+  createdAt: string;
+  result: {
+    tps: number;
+    p50: number;
+    p90: number;
+    p99: number;
+  } | null;
+}
+
 export default function Home() {
   const { data: session, status } = useSession();
 
@@ -22,6 +34,8 @@ export default function Home() {
   const [metrics, setMetrics] = useState({ tps: 0, p50: 0, p90: 0, p99: 0 });
 
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+
+  const [myHistory, setMyHistory] = useState<MySubmission[]>([]);
 
   // The Polling Loop for Live Metrics
   useEffect(() => {
@@ -39,13 +53,6 @@ export default function Home() {
 
     return () => clearInterval(interval);
   }, []);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
-      setDeployStatus(`Ready to deploy: ${e.target.files[0].name}`);
-    }
-  };
 
   // The Polling Loop for Leaderboard
   useEffect(() => {
@@ -65,6 +72,34 @@ export default function Home() {
     const interval = setInterval(fetchLeaderboard, 10000); // Refresh every 10s
     return () => clearInterval(interval);
   }, []);
+
+  // Fetch Submission history when session changes or a deployment completes
+  useEffect(() => {
+    const fetchHistory = async () => {
+      if (session?.user?.id) {
+        try {
+          const res = await fetch("/api/submissions");
+          if (res.ok) {
+            const data = await res.json();
+            setMyHistory(data);
+          }
+        } catch (error) {
+          console.error("Failed to fetch history");
+        }
+      }
+    };
+
+    fetchHistory();
+    const interval = setInterval(fetchHistory, 10000);
+    return () => clearInterval(interval);
+  }, [session, deployStatus]);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setFile(e.target.files[0]);
+      setDeployStatus(`Ready to deploy: ${e.target.files[0].name}`);
+    }
+  };
 
   const handleDeploy = async () => {
     if (!file || !session) return;
@@ -184,30 +219,47 @@ export default function Home() {
 
       {/* GLOBAL LEADERBOARD */}
       <div className="max-w-2xl w-full border border-neutral-800 bg-black p-8 rounded-lg mt-8">
-        <h2 className="text-xl font-bold text-white mb-6 border-b border-neutral-800 pb-2">TOP OPERATORS (GLOBAL)</h2>
-        
+        <h2 className="text-xl font-bold text-white mb-6 border-b border-neutral-800 pb-2">
+          TOP OPERATORS (GLOBAL)
+        </h2>
+
         {leaderboard.length === 0 ? (
-          <div className="text-center text-neutral-600 py-4 text-sm">No benchmark data available.</div>
+          <div className="text-center text-neutral-600 py-4 text-sm">
+            No benchmark data available.
+          </div>
         ) : (
           <div className="flex flex-col gap-2">
             {leaderboard.map((entry, index) => (
-              <div key={entry.id} className="flex items-center justify-between bg-neutral-900 p-3 rounded border border-neutral-800 hover:border-green-900 transition-colors">
+              <div
+                key={entry.id}
+                className="flex items-center justify-between bg-neutral-900 p-3 rounded border border-neutral-800 hover:border-green-900 transition-colors"
+              >
                 <div className="flex items-center gap-4">
-                  <span className={`font-bold w-6 text-center ${index === 0 ? 'text-yellow-400' : index === 1 ? 'text-gray-400' : index === 2 ? 'text-amber-600' : 'text-neutral-600'}`}>
+                  <span
+                    className={`font-bold w-6 text-center ${index === 0 ? "text-yellow-400" : index === 1 ? "text-gray-400" : index === 2 ? "text-amber-600" : "text-neutral-600"}`}
+                  >
                     #{index + 1}
                   </span>
                   {entry.submission.user.image ? (
-                    <img src={entry.submission.user.image} alt="avatar" className="w-6 h-6 rounded-full" />
+                    <img
+                      src={entry.submission.user.image}
+                      alt="avatar"
+                      className="w-6 h-6 rounded-full"
+                    />
                   ) : (
                     <div className="w-6 h-6 rounded-full bg-neutral-700"></div>
                   )}
-                  <span className="text-white text-sm">{entry.submission.user.name || "Anonymous"}</span>
+                  <span className="text-white text-sm">
+                    {entry.submission.user.name || "Anonymous"}
+                  </span>
                 </div>
-                
+
                 <div className="flex items-center gap-6 text-sm">
                   <div className="text-right">
                     <span className="text-neutral-500 text-xs mr-2">TPS</span>
-                    <span className="text-green-400 font-bold">{entry.tps.toLocaleString()}</span>
+                    <span className="text-green-400 font-bold">
+                      {entry.tps.toLocaleString()}
+                    </span>
                   </div>
                   <div className="text-right w-20">
                     <span className="text-neutral-500 text-xs mr-2">p99</span>
@@ -219,6 +271,56 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* MY HISTORY */}
+      {session && (
+        <div className="max-w-2xl w-full border border-neutral-800 bg-black p-8 rounded-lg mt-8">
+          <h2 className="text-xl font-bold text-white mb-6 border-b border-neutral-800 pb-2">
+            MY DEPLOYMENT HISTORY
+          </h2>
+
+          {myHistory.length === 0 ? (
+            <div className="text-center text-neutral-600 py-4 text-sm">
+              No deployments found.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
+              {myHistory.map((sub) => (
+                <div
+                  key={sub.id}
+                  className="flex flex-col sm:flex-row justify-between bg-neutral-900 p-3 rounded border border-neutral-800 text-sm gap-2 sm:gap-0"
+                >
+                  <div className="flex items-center gap-4">
+                    <span
+                      className={`px-2 py-1 text-xs font-bold rounded ${sub.status === "SUCCESS" ? "bg-green-900 text-green-400" : sub.status === "FAILED" ? "bg-red-900 text-red-400" : "bg-yellow-900 text-yellow-400"}`}
+                    >
+                      {sub.status}
+                    </span>
+                    <span className="text-neutral-500 text-xs">
+                      {new Date(sub.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+
+                  {sub.result && (
+                    <div className="flex gap-4 text-xs items-center">
+                      <div>
+                        <span className="text-neutral-600 mr-1">TPS</span>
+                        <span className="text-green-400 font-bold">
+                          {sub.result.tps.toLocaleString()}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-neutral-600 mr-1">p99</span>
+                        <span className="text-white">{sub.result.p99}µs</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </main>
   );
 }
