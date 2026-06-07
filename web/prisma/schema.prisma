@@ -49,6 +49,8 @@ model Result {
   p99           Float        
   
   createdAt     DateTime     @default(now())
+
+  @@index([tps(sort: Desc), p99(sort: Asc)])
 }
 
 model Account {
