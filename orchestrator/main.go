@@ -163,15 +163,27 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 			logCmd.Stdout = os.Stdout
 			logCmd.Stderr = os.Stderr
 			logCmd.Run()
+
+			webURL := os.Getenv("WEB_URL")
+			if webURL == "" {
+				webURL = "http://localhost:3000"
+			}
+			failPayload := map[string]string{
+				"submissionId": subID,
+				"status":       "FAILED",
+			}
+			body, _ := json.Marshal(failPayload)
+			http.Post(webURL+"/api/results", "application/json", bytes.NewBuffer(body))
+
 			return
 		}
-
 		fmt.Printf("[Orchestrator][%s] Target Lock Acquired. Unleashing load generator...\n", subID[:8])
 
 		cmd := exec.Command("go", "run", "main.go")
 		cmd.Dir = "../load-generator"
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		cmd.Env = append(os.Environ(), fmt.Sprintf("SUBMISSION_ID=%s", subID))
 
 		webURL := os.Getenv("WEB_URL")
 		if webURL == "" {
@@ -189,14 +201,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 			body, _ := json.Marshal(failPayload)
 			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
 		} else {
-			fmt.Printf("[Orchestrator][%s] Attack complete. Signaling Next.js...\n", subID[:8])
-
-			successPayload := map[string]string{
-				"submissionId": subID,
-				"status":       "SUCCESS",
-			}
-			body, _ := json.Marshal(successPayload)
-			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+			fmt.Printf("[Orchestrator][%s] Attack complete. Ingester will calculate final score.\n", subID[:8])
 		}
 
 	}(payload.SubmissionID, tempDir, resp.ID)

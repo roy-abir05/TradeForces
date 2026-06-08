@@ -13,44 +13,33 @@ model User {
   email         String?      @unique
   emailVerified DateTime?
   image         String?
-  
   accounts      Account[]
   sessions      Session[]
   submissions   Submission[]
 }
 
-enum Status {
-  PENDING
-  RUNNING
-  SUCCESS
-  FAILED
-}
-
 model Submission {
-  id            String       @id @default(uuid())
-  userId        String
-  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  status        Status       @default(PENDING) 
-  filePath      String       
-  createdAt     DateTime     @default(now())
-
-  result        Result?   
+  id        String   @id @default(uuid())
+  userId    String
+  status    Status   @default(PENDING)
+  filePath  String
+  createdAt DateTime @default(now())
+  result    Result?
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Result {
-  id            String       @id @default(uuid())
-  submissionId  String       @unique
-  submission    Submission   @relation(fields: [submissionId], references: [id], onDelete: Cascade)
-  
-  tps           Int          
-  p50           Float        
-  p90           Float        
-  p99           Float        
-  
-  createdAt     DateTime     @default(now())
+  id           String     @id @default(uuid())
+  submissionId String     @unique
+  tps          Int
+  p50          Float
+  p90          Float
+  p99          Float
+  cv           Float
+  createdAt    DateTime   @default(now())
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
 
-  @@index([tps(sort: Desc), p99(sort: Asc)])
+  @@index([tps(sort: Desc), p99])
 }
 
 model Account {
@@ -65,8 +54,7 @@ model Account {
   scope             String?
   id_token          String?
   session_state     String?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([provider, providerAccountId])
 }
@@ -84,4 +72,11 @@ model VerificationToken {
   expires    DateTime
 
   @@id([identifier, token])
+}
+
+enum Status {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
 }

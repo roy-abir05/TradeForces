@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -14,11 +15,19 @@ import (
 )
 
 type TelemetryRecord struct {
-	LatencyNs int64  `json:"latency_ns"`
-	Status    string `json:"status"`
+	SubmissionID string `json:"submission_id"`
+	Timestamp    int64  `json:"timestamp"`
+	LatencyNs    int64  `json:"latency_ns"`
+	Status       string `json:"status"`
 }
 
 func main() {
+
+	submissionID := os.Getenv("SUBMISSION_ID")
+	if submissionID == "" {
+		log.Fatal("FATAL: SUBMISSION_ID environment variable not set")
+	}
+
 	var kafkaWriter *kafka.Writer = &kafka.Writer{
 		Addr:     kafka.TCP("localhost:9092"),
 		Topic:    "telemetry",
@@ -33,13 +42,28 @@ func main() {
 
 	for i := range workers {
 		wg.Add(1)
-		go worker(i, requests, kafkaWriter, &wg)
+		go worker(i, requests, kafkaWriter, &wg, submissionID)
 	}
 	wg.Wait()
 	fmt.Println("Fleet attack complete. All telemetry data pushed to Redpanda.")
+
+	endRecord := TelemetryRecord{
+		SubmissionID: submissionID,
+		Timestamp:    time.Now().UnixNano(),
+		LatencyNs:    0,
+		Status:       "END_OF_RUN",
+	}
+	endJSON, _ := json.Marshal(endRecord)
+
+	kafkaWriter.WriteMessages(context.Background(),
+		kafka.Message{
+			Key:   []byte(fmt.Sprintf("signal-%s", submissionID)),
+			Value: endJSON,
+		},
+	)
 }
 
-func worker(workerID int, requests int, kafkaWriter *kafka.Writer, wg *sync.WaitGroup) {
+func worker(workerID int, requests int, kafkaWriter *kafka.Writer, wg *sync.WaitGroup, submissionID string) {
 	defer wg.Done()
 
 	conn, err := net.Dial("tcp", "localhost:1337")
@@ -64,7 +88,13 @@ func worker(workerID int, requests int, kafkaWriter *kafka.Writer, wg *sync.Wait
 		}
 
 		latency := time.Since(t0).Nanoseconds()
-		var record TelemetryRecord = TelemetryRecord{latency, "success"}
+
+		record := TelemetryRecord{
+			SubmissionID: submissionID,
+			Timestamp:    t0.UnixNano(),
+			LatencyNs:    latency,
+			Status:       "success",
+		}
 		jsonData, err := json.Marshal(record)
 		if err != nil {
 			continue
