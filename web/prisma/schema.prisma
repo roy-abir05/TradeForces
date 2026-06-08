@@ -79,4 +79,8 @@ enum Status {
   RUNNING
   SUCCESS
   FAILED
+  MLE
+  RE
+  TLE
+  WA
 }

@@ -14,10 +14,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (status === "FAILED") {
+    if (status !== "SUCCESS") {
       await prisma.submission.update({
         where: { id: submissionId },
-        data: { status: "FAILED" },
+        data: { status: status },
       });
       return NextResponse.json({ success: true });
     }

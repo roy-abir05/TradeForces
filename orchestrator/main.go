@@ -99,7 +99,8 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
             ]
         },
         "NanoCPUs": 500000000,
-        "Memory": 134217728
+        "Memory": 134217728,
+        "MemorySwap": 134217728
     }`, hostPath, containerPath))
 	var sandboxConfig container.HostConfig
 	if err := json.Unmarshal(sandboxConfigJSON, &sandboxConfig); err != nil {
@@ -185,23 +186,77 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		cmd.Stderr = os.Stderr
 		cmd.Env = append(os.Environ(), fmt.Sprintf("SUBMISSION_ID=%s", subID))
 
+		attackDone := make(chan error, 1)
+		go func() {
+			attackDone <- cmd.Run()
+		}()
+
+		wait := apiClient.ContainerWait(context.Background(), containerID, client.ContainerWaitOptions{
+			Condition: container.WaitConditionNotRunning,
+		})
+
+		timeout := time.After(60 * time.Second)
+
 		webURL := os.Getenv("WEB_URL")
 		if webURL == "" {
 			webURL = "http://localhost:3000"
 		}
 		resultsEndpoint := webURL + "/api/results"
 
-		if err := cmd.Run(); err != nil {
-			fmt.Printf("[Orchestrator][%s] Load generator failed: %v\n", subID[:8], err)
+		select {
+		case err := <-attackDone:
+			if err != nil {
+				fmt.Printf("[Orchestrator][%s] Load generator failed: %v\n", subID[:8], err)
+				failPayload := map[string]string{
+					"submissionId": subID,
+					"status":       "FAILED",
+				}
+				body, _ := json.Marshal(failPayload)
+				http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+			} else {
+				fmt.Printf("[Orchestrator][%s] Attack complete. Ingester will calculate final score.\n", subID[:8])
+			}
 
+		case waitResp := <-wait.Result:
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+
+			var verdict string
+			if waitResp.StatusCode == 137 {
+				verdict = "MLE"
+				fmt.Printf("[Orchestrator][%s] FATAL: Memory Limit Exceeded (>128MB).\n", subID[:8])
+			} else {
+				verdict = "RE"
+				fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d).\n", subID[:8], waitResp.StatusCode)
+			}
+			failPayload := map[string]string{
+				"submissionId": subID,
+				"status":       verdict,
+			}
+			body, _ := json.Marshal(failPayload)
+			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+
+		case <-timeout:
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+			fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded.\n", subID[:8])
+			failPayload := map[string]string{
+				"submissionId": subID,
+				"status":       "TLE",
+			}
+			body, _ := json.Marshal(failPayload)
+			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+
+		case err := <-wait.Error:
+			fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:8], err)
 			failPayload := map[string]string{
 				"submissionId": subID,
 				"status":       "FAILED",
 			}
 			body, _ := json.Marshal(failPayload)
 			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
-		} else {
-			fmt.Printf("[Orchestrator][%s] Attack complete. Ingester will calculate final score.\n", subID[:8])
 		}
 
 	}(payload.SubmissionID, tempDir, resp.ID)
