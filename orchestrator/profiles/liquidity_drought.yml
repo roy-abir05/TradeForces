@@ -1,0 +1,27 @@
+name: "Liquidity Drought"
+description: "Tests thread wake-up latency after absolute silence."
+phases:
+  - name: "Normal Trading"
+    duration_sec: 2
+    target_tps: 10000
+    distribution:
+      buy: 50
+      sell: 50
+      cancel: 0
+    price_variance_pct: 1.0
+  - name: "Absolute Silence"
+    duration_sec: 3
+    target_tps: 0
+    distribution:
+      buy: 0
+      sell: 0
+      cancel: 0
+    price_variance_pct: 0.0
+  - name: "Micro-burst"
+    duration_sec: 2
+    target_tps: 80000
+    distribution:
+      buy: 50
+      sell: 50
+      cancel: 0
+    price_variance_pct: 2.0
