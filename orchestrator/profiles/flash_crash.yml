@@ -1,0 +1,19 @@
+name: "Flash Crash"
+description: "Sudden asymmetric sell-off to test tree balancing."
+phases:
+  - name: "Warmup"
+    duration_sec: 3
+    target_tps: 10000
+    distribution:
+      buy: 50
+      sell: 50
+      cancel: 0
+    price_variance_pct: 0.5
+  - name: "The Dump"
+    duration_sec: 5
+    target_tps: 50000
+    distribution:
+      buy: 5
+      sell: 95
+      cancel: 0
+    price_variance_pct: 10.0
