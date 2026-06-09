@@ -1,0 +1,19 @@
+name: "Market Sweep"
+description: "Builds a massive sell wall, then sends aggressive buyers crossing the spread."
+phases:
+  - name: "Build Sell Wall"
+    duration_sec: 5
+    target_tps: 20000
+    distribution:
+      buy: 0
+      sell: 100
+      cancel: 0
+    price_variance_pct: 20.0
+  - name: "The Sweep"
+    duration_sec: 2
+    target_tps: 15000
+    distribution:
+      buy: 100
+      sell: 0
+      cancel: 0
+    price_variance_pct: 0.1
