@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )
@@ -180,22 +182,13 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Printf("[Orchestrator][%s] Target Lock Acquired. Unleashing load generator...\n", subID[:8])
 
-		cmd := exec.Command("go", "run", "main.go")
-		cmd.Dir = "../load-generator"
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Env = append(os.Environ(), fmt.Sprintf("SUBMISSION_ID=%s", subID))
-
-		attackDone := make(chan error, 1)
-		go func() {
-			attackDone <- cmd.Run()
-		}()
-
+		entries, err := os.ReadDir("./profiles")
+		if err != nil {
+			log.Fatalf("Failed to read profiles directory: %v", err)
+		}
 		wait := apiClient.ContainerWait(context.Background(), containerID, client.ContainerWaitOptions{
 			Condition: container.WaitConditionNotRunning,
 		})
-
-		timeout := time.After(60 * time.Second)
 
 		webURL := os.Getenv("WEB_URL")
 		if webURL == "" {
@@ -203,62 +196,97 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		resultsEndpoint := webURL + "/api/results"
 
-		select {
-		case err := <-attackDone:
+		for _, entry := range entries {
+			if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
+				continue
+			}
+
+			fmt.Printf("[Orchestrator][%s] Running Test Case: %s\n", subID[:8], entry.Name())
+
+			yamlData, err := os.ReadFile(filepath.Join("./profiles", entry.Name()))
 			if err != nil {
-				fmt.Printf("[Orchestrator][%s] Load generator failed: %v\n", subID[:8], err)
-				failPayload := map[string]string{
-					"submissionId": subID,
-					"status":       "FAILED",
+				log.Printf("Failed to read profile %s: %v", entry.Name(), err)
+				continue
+			}
+
+			var profileMap map[string]interface{}
+			yaml.Unmarshal(yamlData, &profileMap)
+
+			jsonProfileBytes, _ := json.Marshal(profileMap)
+			jsonProfileStr := string(jsonProfileBytes)
+
+			cmd := exec.Command("go", "run", "main.go")
+			cmd.Dir = "../load-generator"
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Env = append(os.Environ(),
+				fmt.Sprintf("SUBMISSION_ID=%s", subID),
+				fmt.Sprintf("CHAOS_PROFILE=%s", jsonProfileStr),
+			)
+
+			attackDone := make(chan error, 1)
+			go func() {
+				attackDone <- cmd.Run()
+			}()
+
+			timeout := time.After(60 * time.Second) // 60s limit per test case
+			testFailed := false
+
+			select {
+			case err := <-attackDone:
+				if err != nil {
+					fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:8], entry.Name(), err)
+					testFailed = true
+					failPayload := map[string]string{"submissionId": subID, "status": "FAILED"}
+					body, _ := json.Marshal(failPayload)
+					http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+				} else {
+					fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:8], entry.Name())
 				}
+
+			case waitResp := <-wait.Result:
+				if cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+
+				var verdict string
+				if waitResp.StatusCode == 137 {
+					verdict = "MLE"
+					fmt.Printf("[Orchestrator][%s] FATAL: Memory Limit Exceeded on %s.\n", subID[:8], entry.Name())
+				} else {
+					verdict = "RE"
+					fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d) on %s.\n", subID[:8], waitResp.StatusCode, entry.Name())
+				}
+
+				testFailed = true
+				failPayload := map[string]string{"submissionId": subID, "status": verdict}
 				body, _ := json.Marshal(failPayload)
 				http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
-			} else {
-				fmt.Printf("[Orchestrator][%s] Attack complete. Ingester will calculate final score.\n", subID[:8])
-			}
 
-		case waitResp := <-wait.Result:
-			if cmd.Process != nil {
-				cmd.Process.Kill()
-			}
+			case <-timeout:
+				if cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+				fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded on %s.\n", subID[:8], entry.Name())
 
-			var verdict string
-			if waitResp.StatusCode == 137 {
-				verdict = "MLE"
-				fmt.Printf("[Orchestrator][%s] FATAL: Memory Limit Exceeded (>128MB).\n", subID[:8])
-			} else {
-				verdict = "RE"
-				fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d).\n", subID[:8], waitResp.StatusCode)
-			}
-			failPayload := map[string]string{
-				"submissionId": subID,
-				"status":       verdict,
-			}
-			body, _ := json.Marshal(failPayload)
-			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+				testFailed = true
+				failPayload := map[string]string{"submissionId": subID, "status": "TLE"}
+				body, _ := json.Marshal(failPayload)
+				http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
 
-		case <-timeout:
-			if cmd.Process != nil {
-				cmd.Process.Kill()
+			case err := <-wait.Error:
+				fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:8], err)
+				testFailed = true
+				failPayload := map[string]string{"submissionId": subID, "status": "FAILED"}
+				body, _ := json.Marshal(failPayload)
+				http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
 			}
-			fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded.\n", subID[:8])
-			failPayload := map[string]string{
-				"submissionId": subID,
-				"status":       "TLE",
+			if testFailed {
+				return
 			}
-			body, _ := json.Marshal(failPayload)
-			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
-
-		case err := <-wait.Error:
-			fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:8], err)
-			failPayload := map[string]string{
-				"submissionId": subID,
-				"status":       "FAILED",
-			}
-			body, _ := json.Marshal(failPayload)
-			http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
 		}
 
+		fmt.Printf("[Orchestrator][%s] All test cases passed.\n", subID[:8])
 	}(payload.SubmissionID, tempDir, resp.ID)
 
 	w.WriteHeader(http.StatusOK)

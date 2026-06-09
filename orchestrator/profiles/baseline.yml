@@ -1,0 +1,11 @@
+name: "The Baseline"
+description: "10 seconds of stable, balanced load."
+phases:
+  - name: "Sustained Load"
+    duration_sec: 10
+    target_tps: 10000
+    distribution:
+      buy: 50
+      sell: 50
+      cancel: 0
+    price_variance_pct: 1.0

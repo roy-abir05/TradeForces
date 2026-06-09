@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -21,11 +23,55 @@ type TelemetryRecord struct {
 	Status       string `json:"status"`
 }
 
+type Profile struct {
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Phases      []Phase `json:"phases"`
+}
+
+type Phase struct {
+	Name             string       `json:"name"`
+	DurationSec      int          `json:"duration_sec"`
+	TargetTPS        int          `json:"target_tps"`
+	Distribution     Distribution `json:"distribution"`
+	PriceVariancePct float64      `json:"price_variance_pct"`
+}
+
+type Distribution struct {
+	Buy    int `json:"buy"`
+	Sell   int `json:"sell"`
+	Cancel int `json:"cancel"`
+}
+
+type AtomicPhaseState struct {
+	BuyWt    int
+	SellWt   int
+	CancelWt int
+}
+
+var EntropySequence [10000]int
+var currentPhaseState atomic.Pointer[AtomicPhaseState]
+
 func main() {
+	rng := rand.New(rand.NewSource(42))
+	for i := 0; i < 10000; i++ {
+		EntropySequence[i] = rng.Intn(100)
+	}
 
 	submissionID := os.Getenv("SUBMISSION_ID")
 	if submissionID == "" {
 		log.Fatal("FATAL: SUBMISSION_ID environment variable not set")
+	}
+
+	chaosJSON := os.Getenv("CHAOS_PROFILE")
+	if chaosJSON == "" {
+		log.Fatal("FATAL: CHAOS_PROFILE environment variable not set")
+	}
+
+	var currentProfile Profile
+	err := json.Unmarshal([]byte(chaosJSON), &currentProfile)
+	if err != nil {
+		log.Fatalf("FATAL: Could not parse chaos profile: %v", err)
 	}
 
 	var kafkaWriter *kafka.Writer = &kafka.Writer{
@@ -36,15 +82,51 @@ func main() {
 	defer kafkaWriter.Close()
 	var wg = sync.WaitGroup{}
 
-	workers, requests := 100, 100
+	workers := 100
 
-	fmt.Printf("Deploying %d workers to fire %d requests each...\n", workers, requests)
+	fmt.Printf("Deploying %d workers for Gauntlet: %s\n", workers, currentProfile.Name)
 
-	for i := range workers {
+	attackTokens := make(chan int, 100000)
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go worker(i, requests, kafkaWriter, &wg, submissionID)
+		go worker(i, attackTokens, kafkaWriter, &wg, submissionID)
 	}
+
+	tokenID := 0
+	for _, phase := range currentProfile.Phases {
+		fmt.Printf("Starting Phase: %s\n", phase.Name)
+
+		state := &AtomicPhaseState{
+			BuyWt:    phase.Distribution.Buy,
+			SellWt:   phase.Distribution.Sell,
+			CancelWt: phase.Distribution.Cancel,
+		}
+		currentPhaseState.Store(state)
+
+		if phase.TargetTPS == 0 {
+			time.Sleep(time.Duration(phase.DurationSec) * time.Second)
+			continue
+		}
+
+		delay := time.Second / time.Duration(phase.TargetTPS)
+		ticker := time.NewTicker(delay)
+		timeout := time.After(time.Duration(phase.DurationSec) * time.Second)
+
+	PhaseLoop:
+		for {
+			select {
+			case <-ticker.C:
+				attackTokens <- tokenID
+				tokenID++
+			case <-timeout:
+				ticker.Stop()
+				break PhaseLoop
+			}
+		}
+	}
+	close(attackTokens)
 	wg.Wait()
+
 	fmt.Println("Fleet attack complete. All telemetry data pushed to Redpanda.")
 
 	endRecord := TelemetryRecord{
@@ -63,7 +145,7 @@ func main() {
 	)
 }
 
-func worker(workerID int, requests int, kafkaWriter *kafka.Writer, wg *sync.WaitGroup, submissionID string) {
+func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg *sync.WaitGroup, submissionID string) {
 	defer wg.Done()
 
 	conn, err := net.Dial("tcp", "localhost:1337")
@@ -74,12 +156,44 @@ func worker(workerID int, requests int, kafkaWriter *kafka.Writer, wg *sync.Wait
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
-	order := "BUY 100 BTC @ 60000\n"
 
-	for i := 0; i < requests; i++ {
+	for tokenID := range attackTokens {
+
+		state := currentPhaseState.Load()
+		if state == nil {
+			continue
+		}
+
+		entropy := EntropySequence[tokenID%10000]
+
+		var orderType string
+		if entropy < state.BuyWt {
+			orderType = "BUY"
+		} else if entropy < state.BuyWt+state.SellWt {
+			orderType = "SELL"
+		} else {
+			orderType = "CANCEL"
+		}
+
+		var orderStr string
+		targetPrice := 60000
+
+		if orderType == "CANCEL" {
+			targetCancelID := (tokenID % 5000) + 1
+			orderStr = fmt.Sprintf("CANCEL %d\n", targetCancelID)
+		} else {
+			priceOffset := (tokenID % 50)
+			if tokenID%2 == 0 {
+				targetPrice += priceOffset
+			} else {
+				targetPrice -= priceOffset
+			}
+			orderStr = fmt.Sprintf("%s 100 BTC @ %d ID=%d\n", orderType, targetPrice, tokenID+1)
+		}
+
 		t0 := time.Now()
 
-		fmt.Fprint(conn, order)
+		fmt.Fprint(conn, orderStr)
 
 		_, err := reader.ReadString('\n')
 		if err != nil {
@@ -93,22 +207,23 @@ func worker(workerID int, requests int, kafkaWriter *kafka.Writer, wg *sync.Wait
 			SubmissionID: submissionID,
 			Timestamp:    t0.UnixNano(),
 			LatencyNs:    latency,
-			Status:       "success",
+			Status:       "SUCCESS",
 		}
 		jsonData, err := json.Marshal(record)
 		if err != nil {
 			continue
 		}
 
-		err = kafkaWriter.WriteMessages(context.Background(),
-			kafka.Message{
-				Key:   []byte(fmt.Sprintf("worker-%d", workerID)),
-				Value: jsonData,
-			},
-		)
-
-		if err != nil {
-			log.Printf("Worker %d failed to write to Kafka: %v\n", workerID, err)
-		}
+		go func(val []byte, wID int) {
+			err = kafkaWriter.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte(fmt.Sprintf("worker-%d", wID)),
+					Value: val,
+				},
+			)
+			if err != nil {
+				log.Printf("Worker %d failed to write to Kafka: %v\n", wID, err)
+			}
+		}(jsonData, workerID)
 	}
 }
