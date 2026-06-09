@@ -118,9 +118,9 @@ func main() {
 				sort.Slice(window, func(i, j int) bool { return window[i] < window[j] })
 				requests := int64(len(window))
 
-				p50 := window[int64(float64(requests)*0.5)-1] / 1000
-				p90 := window[int64(float64(requests)*0.9)-1] / 1000
-				p99 := window[int64(float64(requests)*0.99)-1] / 1000
+				p50 := window[int(float64(requests)*0.50)] / 1000
+				p90 := window[int(float64(requests)*0.90)] / 1000
+				p99 := window[int(float64(requests)*0.99)] / 1000
 
 				metrics := LiveMetrics{
 					SubmissionID: subID,

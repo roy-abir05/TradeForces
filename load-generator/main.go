@@ -82,6 +82,8 @@ func main() {
 	defer kafkaWriter.Close()
 	var wg = sync.WaitGroup{}
 
+	var kafkaWG = sync.WaitGroup{}
+
 	workers := 100
 
 	fmt.Printf("Deploying %d workers for Gauntlet: %s\n", workers, currentProfile.Name)
@@ -89,7 +91,7 @@ func main() {
 	attackTokens := make(chan int, 100000)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go worker(i, attackTokens, kafkaWriter, &wg, submissionID)
+		go worker(i, attackTokens, kafkaWriter, &wg, &kafkaWG, submissionID)
 	}
 
 	tokenID := 0
@@ -126,6 +128,7 @@ func main() {
 	}
 	close(attackTokens)
 	wg.Wait()
+	kafkaWG.Wait()
 
 	fmt.Println("Fleet attack complete. All telemetry data pushed to Redpanda.")
 
@@ -145,7 +148,7 @@ func main() {
 	)
 }
 
-func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg *sync.WaitGroup, submissionID string) {
+func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg *sync.WaitGroup, kafkaWG *sync.WaitGroup, submissionID string) {
 	defer wg.Done()
 
 	conn, err := net.Dial("tcp", "localhost:1337")
@@ -214,7 +217,10 @@ func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg
 			continue
 		}
 
+		kafkaWG.Add(1)
+
 		go func(val []byte, wID int) {
+			defer kafkaWG.Done()
 			err = kafkaWriter.WriteMessages(context.Background(),
 				kafka.Message{
 					Key:   []byte(fmt.Sprintf("worker-%d", wID)),
