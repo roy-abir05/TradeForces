@@ -142,7 +142,7 @@ func main() {
 
 	kafkaWriter.WriteMessages(context.Background(),
 		kafka.Message{
-			Key:   []byte(fmt.Sprintf("signal-%s", submissionID)),
+			Key:   []byte(submissionID),
 			Value: endJSON,
 		},
 	)
@@ -223,7 +223,7 @@ func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg
 			defer kafkaWG.Done()
 			err = kafkaWriter.WriteMessages(context.Background(),
 				kafka.Message{
-					Key:   []byte(fmt.Sprintf("worker-%d", wID)),
+					Key:   []byte(submissionID),
 					Value: val,
 				},
 			)

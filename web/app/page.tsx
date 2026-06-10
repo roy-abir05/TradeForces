@@ -43,6 +43,12 @@ export default function Home() {
   useEffect(() => {
     if (!activeSubmissionId) return;
 
+    const currentRun = myHistory.find(sub => sub.id === activeSubmissionId);
+    if (currentRun && (currentRun.status === "SUCCESS" || currentRun.status === "FAILED")) {
+      console.log("[UI] Run complete. Freezing telemetry board.");
+      return;
+    }
+
     console.log(
       `[WebSocket] Connecting to Go Hub for submission: ${activeSubmissionId}`,
     );
