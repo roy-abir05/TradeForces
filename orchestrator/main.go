@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,8 @@ import (
 type Orchestrator struct {
 	dbPool       *pgxpool.Pool
 	dockerClient *client.Client
+	queue        chan DeployPayload
+	workerSem    chan struct{}
 }
 
 type DeployPayload struct {
@@ -46,28 +49,64 @@ func (o *Orchestrator) deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tempDir, err := os.MkdirTemp("", "tradeforces-sub-*")
+	// Push to the internal queue and instantly free the HTTP connection
+	o.queue <- payload
+
+	_, err := o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'PENDING' WHERE id = $1`, payload.SubmissionID)
 	if err != nil {
-		http.Error(w, "Failed to create temp directory", http.StatusInternalServerError)
+		fmt.Printf("[Orchestrator][%s] Failed to set PENDING status: %v\n", payload.SubmissionID[:8], err)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Deployed and Queued"))
+}
+
+func (o *Orchestrator) dispatcher() {
+	for payload := range o.queue {
+		o.workerSem <- struct{}{}
+		go o.processSubmission(payload)
+	}
+}
+
+func (o *Orchestrator) processSubmission(payload DeployPayload) {
+	defer func() { <-o.workerSem }()
+
+	ctx := context.Background()
+	subID := payload.SubmissionID
+	fmt.Printf("\n[Orchestrator] Starting processing for Submission: %s\n", subID)
+
+	_, err := o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'RUNNING' WHERE id = $1`, subID)
+	if err != nil {
+		fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], err)
+	}
+
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("tradeforces-sub-%s-*", subID[:8]))
+	if err != nil {
+		log.Printf("[%s] Failed to create temp directory: %v", subID[:8], err)
 		return
 	}
 
 	sourcePath := filepath.Join(tempDir, "server.cpp")
 	if err := os.WriteFile(sourcePath, []byte(payload.Code), 0644); err != nil {
 		os.RemoveAll(tempDir)
-		http.Error(w, "Failed to write code to temp file", http.StatusInternalServerError)
+		log.Printf("[%s] Failed to write code: %v", subID[:8], err)
 		return
 	}
 
-	ctx := context.Background()
-
-	fmt.Printf("\n[Orchestrator] Received deployment request for Submission: %s\n", payload.SubmissionID)
+	// The Port 0 Trick: Ask the OS for a free dynamic port
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		os.RemoveAll(tempDir)
+		log.Printf("[%s] Failed to allocate dynamic port: %v", subID[:8], err)
+		return
+	}
+	hostPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	listener.Close()
 
 	reader, err := o.dockerClient.ImagePull(ctx, "docker.io/library/gcc:latest", client.ImagePullOptions{})
 	if err != nil {
 		os.RemoveAll(tempDir)
-		log.Printf("Image pull failed: %v", err)
-		http.Error(w, "Failed to pull execution image", http.StatusInternalServerError)
+		log.Printf("[%s] Image pull failed: %v", subID[:8], err)
 		return
 	}
 	defer reader.Close()
@@ -95,15 +134,16 @@ func (o *Orchestrator) deployHandler(w http.ResponseWriter, r *http.Request) {
         "PortBindings": {
             "1337/tcp": [
                 {
-                    "HostIp": "0.0.0.0",
-                    "HostPort": "1337"
+                    "HostIp": "127.0.0.1",
+                    "HostPort": "%s"
                 }
             ]
         },
         "NanoCPUs": 500000000,
         "Memory": 134217728,
         "MemorySwap": 134217728
-    }`, hostPath, containerPath))
+    }`, hostPath, containerPath, hostPort))
+
 	var sandboxConfig container.HostConfig
 	if err := json.Unmarshal(sandboxConfigJSON, &sandboxConfig); err != nil {
 		os.RemoveAll(tempDir)
@@ -116,204 +156,156 @@ func (o *Orchestrator) deployHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		os.RemoveAll(tempDir)
-		log.Fatalf("Failed to create container: %v", err)
-		http.Error(w, "Failed to allocate container sandbox", http.StatusInternalServerError)
+		log.Printf("[%s] Failed to create container: %v", subID[:8], err)
 		return
 	}
 
-	_, err = o.dockerClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{})
-	if err != nil {
+	defer func() {
 		os.RemoveAll(tempDir)
-		log.Fatalf("Failed to start container: %v", err)
-		http.Error(w, "Failed to allocate container sandbox", http.StatusInternalServerError)
+		exec.Command("docker", "rm", "-f", resp.ID).Run()
+		fmt.Printf("[Orchestrator][%s] Cleanup complete.\n", subID[:8])
+	}()
+
+	if _, err := o.dockerClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
+		log.Printf("[%s] Failed to start container: %v", subID[:8], err)
 		return
 	}
 
-	fmt.Printf("[Orchestrator] Engine running in Sandbox ID: %s\n", resp.ID[:12])
+	fmt.Printf("[Orchestrator][%s] Engine running on dynamically allocated port %s\n", subID[:8], hostPort)
 
-	go func(subID string, ephemeralDir string, containerID string) {
-		defer func() {
-			os.RemoveAll(ephemeralDir)
-			cleanupCmd := exec.Command("docker", "rm", "-f", containerID)
-			cleanupCmd.Run()
-			fmt.Printf("[Orchestrator][%s] Cleanup complete.\n", subID[:8])
+	targetAddress := fmt.Sprintf("127.0.0.1:%s", hostPort)
+	engineReady := false
+
+	for range 50 {
+		conn, err := net.DialTimeout("tcp", targetAddress, 100*time.Millisecond)
+		if err == nil {
+			conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			var buf [1]byte
+			_, readErr := conn.Read(buf[:])
+
+			if readErr != nil && !os.IsTimeout(readErr) {
+				conn.Close()
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			conn.Close()
+			engineReady = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !engineReady {
+		fmt.Printf("[Orchestrator][%s] FATAL: Engine failed to bind to port %s within 5 seconds.\n", subID[:8], hostPort)
+		logCmd := exec.Command("docker", "logs", resp.ID)
+		logCmd.Stdout = os.Stdout
+		logCmd.Stderr = os.Stderr
+		logCmd.Run()
+
+		o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
+		return
+	}
+
+	fmt.Printf("[Orchestrator][%s] Target Lock Acquired. Unleashing load generator...\n", subID[:8])
+
+	entries, err := os.ReadDir("./profiles")
+	if err != nil {
+		log.Printf("[%s] Failed to read profiles directory: %v", subID[:8], err)
+		return
+	}
+	wait := o.dockerClient.ContainerWait(ctx, resp.ID, client.ContainerWaitOptions{
+		Condition: container.WaitConditionNotRunning,
+	})
+
+	for _, entry := range entries {
+		if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
+			continue
+		}
+
+		fmt.Printf("[Orchestrator][%s] Running Test Case: %s\n", subID[:8], entry.Name())
+
+		yamlData, err := os.ReadFile(filepath.Join("./profiles", entry.Name()))
+		if err != nil {
+			log.Printf("[%s] Failed to read profile %s: %v", subID[:8], entry.Name(), err)
+			continue
+		}
+
+		var profileMap map[string]interface{}
+		yaml.Unmarshal(yamlData, &profileMap)
+
+		jsonProfileBytes, _ := json.Marshal(profileMap)
+
+		cmd := exec.Command("go", "run", "main.go")
+		cmd.Dir = "../load-generator"
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("SUBMISSION_ID=%s", subID),
+			fmt.Sprintf("CHAOS_PROFILE=%s", string(jsonProfileBytes)),
+			fmt.Sprintf("TARGET_PORT=%s", hostPort), // Inform generator of the correct dynamic port
+		)
+
+		attackDone := make(chan error, 1)
+		go func() {
+			attackDone <- cmd.Run()
 		}()
 
-		targetAddress := "localhost:1337"
-		engineReady := false
+		timeout := time.After(60 * time.Second)
+		testFailed := false
 
-		for range 50 {
-			conn, err := net.DialTimeout("tcp", targetAddress, 100*time.Millisecond)
-			if err == nil {
-				conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-				var buf [1]byte
-				_, readErr := conn.Read(buf[:])
-
-				if readErr != nil {
-					if !os.IsTimeout(readErr) {
-						conn.Close()
-						time.Sleep(100 * time.Millisecond)
-						continue
-					}
-				}
-
-				conn.Close()
-				engineReady = true
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		if !engineReady {
-			fmt.Printf("[Orchestrator][%s] FATAL: Engine failed to bind to port 1337 within 5 seconds.\n", subID[:8])
-			logCmd := exec.Command("docker", "logs", containerID)
-			logCmd.Stdout = os.Stdout
-			logCmd.Stderr = os.Stderr
-			logCmd.Run()
-
-			_, dbErr := o.dbPool.Exec(context.Background(),
-				`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
-				"FAILED", subID,
-			)
-			if dbErr != nil {
-				fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
-			}
-
-			return
-		}
-		fmt.Printf("[Orchestrator][%s] Target Lock Acquired. Unleashing load generator...\n", subID[:8])
-
-		entries, err := os.ReadDir("./profiles")
-		if err != nil {
-			log.Printf("Failed to read profiles directory: %v", err)
-			return
-		}
-		wait := o.dockerClient.ContainerWait(context.Background(), containerID, client.ContainerWaitOptions{
-			Condition: container.WaitConditionNotRunning,
-		})
-
-		for _, entry := range entries {
-			if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
-				continue
-			}
-
-			fmt.Printf("[Orchestrator][%s] Running Test Case: %s\n", subID[:8], entry.Name())
-
-			yamlData, err := os.ReadFile(filepath.Join("./profiles", entry.Name()))
+		select {
+		case err := <-attackDone:
 			if err != nil {
-				log.Printf("Failed to read profile %s: %v", entry.Name(), err)
-				continue
+				fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:8], entry.Name(), err)
+				testFailed = true
+				o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
+			} else {
+				fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:8], entry.Name())
 			}
 
-			var profileMap map[string]interface{}
-			yaml.Unmarshal(yamlData, &profileMap)
-
-			jsonProfileBytes, _ := json.Marshal(profileMap)
-			jsonProfileStr := string(jsonProfileBytes)
-
-			cmd := exec.Command("go", "run", "main.go")
-			cmd.Dir = "../load-generator"
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Env = append(os.Environ(),
-				fmt.Sprintf("SUBMISSION_ID=%s", subID),
-				fmt.Sprintf("CHAOS_PROFILE=%s", jsonProfileStr),
-			)
-
-			attackDone := make(chan error, 1)
-			go func() {
-				attackDone <- cmd.Run()
-			}()
-
-			timeout := time.After(60 * time.Second) // 60s limit per test case
-			testFailed := false
-
-			select {
-			case err := <-attackDone:
-				if err != nil {
-					fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:8], entry.Name(), err)
-					testFailed = true
-
-					_, dbErr := o.dbPool.Exec(context.Background(),
-						`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
-						"FAILED", subID,
-					)
-					if dbErr != nil {
-						fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
-					}
-				} else {
-					fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:8], entry.Name())
-				}
-
-			case waitResp := <-wait.Result:
-				if cmd.Process != nil {
-					cmd.Process.Kill()
-				}
-
-				var verdict string
-				if waitResp.StatusCode == 137 {
-					verdict = "MLE"
-					fmt.Printf("[Orchestrator][%s] FATAL: Memory Limit Exceeded on %s.\n", subID[:8], entry.Name())
-				} else {
-					verdict = "RE"
-					fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d) on %s.\n", subID[:8], waitResp.StatusCode, entry.Name())
-				}
-
-				testFailed = true
-
-				_, dbErr := o.dbPool.Exec(context.Background(),
-					`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
-					verdict, subID,
-				)
-				if dbErr != nil {
-					fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
-				}
-
-			case <-timeout:
-				if cmd.Process != nil {
-					cmd.Process.Kill()
-				}
-				fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded on %s.\n", subID[:8], entry.Name())
-
-				testFailed = true
-				_, dbErr := o.dbPool.Exec(context.Background(),
-					`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
-					"TLE", subID,
-				)
-				if dbErr != nil {
-					fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
-				}
-
-			case err := <-wait.Error:
-				fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:8], err)
-				testFailed = true
-				_, dbErr := o.dbPool.Exec(context.Background(),
-					`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
-					"FAILED", subID,
-				)
-				if dbErr != nil {
-					fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
-				}
+		case waitResp := <-wait.Result:
+			if cmd.Process != nil {
+				cmd.Process.Kill()
 			}
-			if testFailed {
-				return
+			verdict := "RE"
+			if waitResp.StatusCode == 137 {
+				verdict = "MLE"
+				fmt.Printf("[Orchestrator][%s] FATAL: Memory Limit Exceeded on %s.\n", subID[:8], entry.Name())
+			} else {
+				fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d) on %s.\n", subID[:8], waitResp.StatusCode, entry.Name())
 			}
+			testFailed = true
+			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = $1 WHERE id = $2`, verdict, subID)
+
+		case <-timeout:
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+			fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded on %s.\n", subID[:8], entry.Name())
+			testFailed = true
+			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'TLE' WHERE id = $1`, subID)
+
+		case err := <-wait.Error:
+			fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:8], err)
+			testFailed = true
+			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
 		}
 
-		fmt.Printf("[Orchestrator][%s] All test cases passed.\n", subID[:8])
-	}(payload.SubmissionID, tempDir, resp.ID)
+		if testFailed {
+			return
+		}
+	}
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Deployed and Attack Initiated"))
+	fmt.Printf("[Orchestrator][%s] All test cases passed.\n", subID[:8])
 }
 
 func main() {
 	ctx := context.Background()
 
-	// Postgres Connection Pool
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgresql://tradeforces:supersecretpassword@localhost:5433/tradeforces_db?schema=public&sslmode=disable"
+		dbURL = "postgresql://tradeforces:supersecretpassword@localhost:5433/tradeforces_db?sslmode=disable"
 	}
 
 	dbPool, err := pgxpool.New(ctx, dbURL)
@@ -323,7 +315,6 @@ func main() {
 	defer dbPool.Close()
 	fmt.Println("[Orchestrator] Connected to PostgreSQL connection pool.")
 
-	//Docker Client
 	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		log.Fatalf("[Docker] Failed to initialize Docker client: %v", err)
@@ -331,13 +322,24 @@ func main() {
 	defer dockerClient.Close()
 	fmt.Println("[Orchestrator] Docker client initialized.")
 
+	maxWorkers := 12
+	if mwStr := os.Getenv("MAX_WORKERS"); mwStr != "" {
+		if val, err := strconv.Atoi(mwStr); err == nil && val > 0 {
+			maxWorkers = val
+		}
+	}
+
 	orch := &Orchestrator{
 		dbPool:       dbPool,
 		dockerClient: dockerClient,
+		queue:        make(chan DeployPayload, 10000),
+		workerSem:    make(chan struct{}, maxWorkers),
 	}
+
+	go orch.dispatcher()
 
 	http.HandleFunc("/deploy", orch.deployHandler)
 
-	fmt.Println("[Orchestrator] Listening on http://localhost:8080")
+	fmt.Printf("[Orchestrator] Listening on http://localhost:8080 (Max Workers: %d)\n", maxWorkers)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }

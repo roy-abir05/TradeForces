@@ -151,7 +151,12 @@ func main() {
 func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg *sync.WaitGroup, kafkaWG *sync.WaitGroup, submissionID string) {
 	defer wg.Done()
 
-	conn, err := net.Dial("tcp", "localhost:1337")
+	targetPort := os.Getenv("TARGET_PORT")
+	if targetPort == "" {
+		targetPort = "1337"
+	}
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", targetPort))
 	if err != nil {
 		log.Printf("Worker %d failed to connect: %v\n", workerID, err)
 		return
