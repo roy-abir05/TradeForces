@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,18 +13,23 @@ import (
 	"path/filepath"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+	"gopkg.in/yaml.v3"
 )
+
+type Orchestrator struct {
+	dbPool       *pgxpool.Pool
+	dockerClient *client.Client
+}
 
 type DeployPayload struct {
 	SubmissionID string `json:"submissionId"`
 	Code         string `json:"code"`
 }
 
-func deployHandler(w http.ResponseWriter, r *http.Request) {
+func (o *Orchestrator) deployHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
 		return
@@ -56,19 +60,15 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	apiClient, err := client.New(client.FromEnv)
-	if err != nil {
-		os.RemoveAll(tempDir)
-		log.Fatalf("Failed to connect to Docker: %v", err)
-	}
-	defer apiClient.Close()
 
 	fmt.Printf("\n[Orchestrator] Received deployment request for Submission: %s\n", payload.SubmissionID)
 
-	reader, err := apiClient.ImagePull(ctx, "docker.io/library/gcc:latest", client.ImagePullOptions{})
+	reader, err := o.dockerClient.ImagePull(ctx, "docker.io/library/gcc:latest", client.ImagePullOptions{})
 	if err != nil {
 		os.RemoveAll(tempDir)
-		log.Fatalf("Image pull failed: %v", err)
+		log.Printf("Image pull failed: %v", err)
+		http.Error(w, "Failed to pull execution image", http.StatusInternalServerError)
+		return
 	}
 	defer reader.Close()
 	io.Copy(os.Stdout, reader)
@@ -110,19 +110,23 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		log.Fatalf("JSON Parse Error: %v", err)
 	}
 
-	resp, err := apiClient.ContainerCreate(ctx, client.ContainerCreateOptions{
+	resp, err := o.dockerClient.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Config:     &engineConfig,
 		HostConfig: &sandboxConfig,
 	})
 	if err != nil {
 		os.RemoveAll(tempDir)
 		log.Fatalf("Failed to create container: %v", err)
+		http.Error(w, "Failed to allocate container sandbox", http.StatusInternalServerError)
+		return
 	}
 
-	_, err = apiClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{})
+	_, err = o.dockerClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{})
 	if err != nil {
 		os.RemoveAll(tempDir)
 		log.Fatalf("Failed to start container: %v", err)
+		http.Error(w, "Failed to allocate container sandbox", http.StatusInternalServerError)
+		return
 	}
 
 	fmt.Printf("[Orchestrator] Engine running in Sandbox ID: %s\n", resp.ID[:12])
@@ -167,16 +171,13 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 			logCmd.Stderr = os.Stderr
 			logCmd.Run()
 
-			webURL := os.Getenv("WEB_URL")
-			if webURL == "" {
-				webURL = "http://localhost:3000"
+			_, dbErr := o.dbPool.Exec(context.Background(),
+				`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
+				"FAILED", subID,
+			)
+			if dbErr != nil {
+				fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
 			}
-			failPayload := map[string]string{
-				"submissionId": subID,
-				"status":       "FAILED",
-			}
-			body, _ := json.Marshal(failPayload)
-			http.Post(webURL+"/api/results", "application/json", bytes.NewBuffer(body))
 
 			return
 		}
@@ -184,17 +185,12 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 
 		entries, err := os.ReadDir("./profiles")
 		if err != nil {
-			log.Fatalf("Failed to read profiles directory: %v", err)
+			log.Printf("Failed to read profiles directory: %v", err)
+			return
 		}
-		wait := apiClient.ContainerWait(context.Background(), containerID, client.ContainerWaitOptions{
+		wait := o.dockerClient.ContainerWait(context.Background(), containerID, client.ContainerWaitOptions{
 			Condition: container.WaitConditionNotRunning,
 		})
-
-		webURL := os.Getenv("WEB_URL")
-		if webURL == "" {
-			webURL = "http://localhost:3000"
-		}
-		resultsEndpoint := webURL + "/api/results"
 
 		for _, entry := range entries {
 			if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
@@ -237,9 +233,14 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:8], entry.Name(), err)
 					testFailed = true
-					failPayload := map[string]string{"submissionId": subID, "status": "FAILED"}
-					body, _ := json.Marshal(failPayload)
-					http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+
+					_, dbErr := o.dbPool.Exec(context.Background(),
+						`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
+						"FAILED", subID,
+					)
+					if dbErr != nil {
+						fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
+					}
 				} else {
 					fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:8], entry.Name())
 				}
@@ -259,9 +260,14 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				testFailed = true
-				failPayload := map[string]string{"submissionId": subID, "status": verdict}
-				body, _ := json.Marshal(failPayload)
-				http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+
+				_, dbErr := o.dbPool.Exec(context.Background(),
+					`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
+					verdict, subID,
+				)
+				if dbErr != nil {
+					fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
+				}
 
 			case <-timeout:
 				if cmd.Process != nil {
@@ -270,16 +276,24 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 				fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded on %s.\n", subID[:8], entry.Name())
 
 				testFailed = true
-				failPayload := map[string]string{"submissionId": subID, "status": "TLE"}
-				body, _ := json.Marshal(failPayload)
-				http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+				_, dbErr := o.dbPool.Exec(context.Background(),
+					`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
+					"TLE", subID,
+				)
+				if dbErr != nil {
+					fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
+				}
 
 			case err := <-wait.Error:
 				fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:8], err)
 				testFailed = true
-				failPayload := map[string]string{"submissionId": subID, "status": "FAILED"}
-				body, _ := json.Marshal(failPayload)
-				http.Post(resultsEndpoint, "application/json", bytes.NewBuffer(body))
+				_, dbErr := o.dbPool.Exec(context.Background(),
+					`UPDATE "Submission" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
+					"FAILED", subID,
+				)
+				if dbErr != nil {
+					fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], dbErr)
+				}
 			}
 			if testFailed {
 				return
@@ -294,7 +308,36 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.HandleFunc("/deploy", deployHandler)
+	ctx := context.Background()
+
+	// Postgres Connection Pool
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://tradeforces:supersecretpassword@localhost:5433/tradeforces_db?schema=public&sslmode=disable"
+	}
+
+	dbPool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		log.Fatalf("[Database] Unable to create connection pool: %v", err)
+	}
+	defer dbPool.Close()
+	fmt.Println("[Orchestrator] Connected to PostgreSQL connection pool.")
+
+	//Docker Client
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		log.Fatalf("[Docker] Failed to initialize Docker client: %v", err)
+	}
+	defer dockerClient.Close()
+	fmt.Println("[Orchestrator] Docker client initialized.")
+
+	orch := &Orchestrator{
+		dbPool:       dbPool,
+		dockerClient: dockerClient,
+	}
+
+	http.HandleFunc("/deploy", orch.deployHandler)
+
 	fmt.Println("[Orchestrator] Listening on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
