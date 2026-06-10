@@ -131,6 +131,8 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 
 	sandboxConfigJSON := []byte(fmt.Sprintf(`{
         "Binds": ["%s:%s"],
+        "NetworkMode": "tradeforces-net",
+        "CapDrop": ["ALL"],
         "PortBindings": {
             "1337/tcp": [
                 {

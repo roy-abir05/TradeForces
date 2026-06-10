@@ -32,3 +32,8 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  tradeforces-net:
+    name: tradeforces-net
+    internal: true
