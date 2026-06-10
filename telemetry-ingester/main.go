@@ -69,7 +69,7 @@ func main() {
 	// Initialize Postgres Context Connection
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgresql://tradeforces:supersecretpassword@localhost:5433/tradeforces_db?schema=public&sslmode=disable"
+		dbURL = "postgresql://tradeforces:supersecretpassword@localhost:5433/tradeforces_db?sslmode=disable"
 	}
 	dbConn, err := pgx.Connect(context.Background(), dbURL)
 	if err != nil {
@@ -232,15 +232,26 @@ func calculateAndPersistFinalScore(dbConn *pgx.Conn, subID string, latencies []f
 
 	fmt.Printf("[Final Score][%s] TPS: %.2f | p99: %.2fµs | CV: %.4f\n", subID, tps, p99, cv)
 
-	// Direct DB Ingress: Writing straight to schema table using Postgres connection pool
-	query := `
-		UPDATE "Submission" 
-		SET status = 'SUCCESS', tps = $1, p50 = $2, p90 = $3, p99 = $4, cv = $5, "updatedAt" = NOW() 
-		WHERE id = $6`
+	resultQuery := `
+		INSERT INTO "Result" (id, "submissionId", tps, p50, p90, p99, cv, "createdAt")
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT ("submissionId") DO UPDATE SET
+			tps = EXCLUDED.tps,
+			p50 = EXCLUDED.p50,
+			p90 = EXCLUDED.p90,
+			p99 = EXCLUDED.p99,
+			cv = EXCLUDED.cv;`
 
-	_, err := dbConn.Exec(context.Background(), query, tps, p50, p90, p99, cv, subID)
+	_, err := dbConn.Exec(context.Background(), resultQuery, subID, int(tps), p50, p90, p99, cv)
 	if err != nil {
-		fmt.Printf("[Database Error] Direct ingress write failure for submission %s: %v\n", subID, err)
+		fmt.Printf("[Database Error] Direct ingress write failure for Result table %s: %v\n", subID, err)
+		return
+	}
+
+	submissionQuery := `UPDATE "Submission" SET status = 'SUCCESS' WHERE id = $1`
+	_, err = dbConn.Exec(context.Background(), submissionQuery, subID)
+	if err != nil {
+		fmt.Printf("[Database Error] Direct ingress write failure for Submission table %s: %v\n", subID, err)
 		return
 	}
 	fmt.Printf("[Database] Final benchmark results securely committed for run: %s\n", subID)
