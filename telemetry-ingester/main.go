@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,10 +9,10 @@ import (
 	"net/http"
 	"os"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -32,29 +31,62 @@ type LiveMetrics struct {
 	P99          int64  `json:"p99"`
 }
 
-var (
-	clients   = make(map[*websocket.Conn]bool)
-	clientsMu sync.Mutex
-	upgrader  = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-)
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
 
-func wsHandler(w http.ResponseWriter, r *http.Request) {
+func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	ip := r.RemoteAddr
+
+	// Enforce Token-Bucket Flood Protection before completing protocol upgrade
+	if !hub.AllowIP(ip) {
+		http.Error(w, "Too Many Connection Requests", http.StatusTooManyRequests)
+		log.Printf("[Security] Rejected connections flood from IP: %s", ip)
+		return
+	}
+
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[Ingester] WebSocket Upgrade Error: %v", err)
 		return
 	}
-	clientsMu.Lock()
-	clients[ws] = true
-	clientsMu.Unlock()
-	fmt.Println("[Ingester] Next.js Server connected to Live Feed.")
+
+	client := &Client{
+		hub:  hub,
+		conn: ws,
+		send: make(chan LiveMetrics, 256),
+		ip:   ip,
+	}
+
+	client.hub.register <- client
+
+	// Start reading and writing asynchronously using dedicated client Goroutines
+	go client.WritePump()
+	go client.ReadPump()
 }
 
 func main() {
+	// Initialize Postgres Context Connection
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://tradeforces:supersecretpassword@localhost:5433/tradeforces_db?schema=public&sslmode=disable"
+	}
+	dbConn, err := pgx.Connect(context.Background(), dbURL)
+	if err != nil {
+		log.Fatalf("[Database] Unable to connect to PostgreSQL: %v", err)
+	}
+	defer dbConn.Close(context.Background())
+	fmt.Println("[Database] Connected directly to PostgreSQL database.")
+
+	// Spin up Actor Hub
+	hub := NewHub()
+	go hub.Run()
+
+	// Launch HTTP Server binding endpoint directly to our stateful hub router
 	go func() {
-		http.HandleFunc("/ws", wsHandler)
+		http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+			serveWs(hub, w, r)
+		})
 		log.Fatal(http.ListenAndServe(":8081", nil))
 	}()
 
@@ -78,7 +110,6 @@ func main() {
 	currentWindows := make(map[string][]int64)
 	globalLatencies := make(map[string][]float64)
 	runStartTimes := make(map[string]int64)
-	runEndTimes := make(map[string]int64)
 
 	for {
 		select {
@@ -88,7 +119,8 @@ func main() {
 			if record.Status == "END_OF_RUN" {
 				fmt.Printf("[Ingester] END_OF_RUN received for %s. Calculating final score...\n", subID)
 
-				calculateAndSendFinalScore(
+				calculateAndPersistFinalScore(
+					dbConn,
 					subID,
 					globalLatencies[subID],
 					runStartTimes[subID],
@@ -98,7 +130,6 @@ func main() {
 				delete(currentWindows, subID)
 				delete(globalLatencies, subID)
 				delete(runStartTimes, subID)
-				delete(runEndTimes, subID)
 				continue
 			}
 
@@ -130,14 +161,8 @@ func main() {
 					P99:          p99,
 				}
 
-				clientsMu.Lock()
-				for client := range clients {
-					if err := client.WriteJSON(metrics); err != nil {
-						client.Close()
-						delete(clients, client)
-					}
-				}
-				clientsMu.Unlock()
+				// Ship metric payload straight down the Actor Model Hub channel
+				hub.broadcast <- metrics
 
 				currentWindows[subID] = nil
 			}
@@ -158,7 +183,7 @@ func readKafka(kafkaReader *kafka.Reader, recordChan chan TelemetryRecord) {
 	}
 }
 
-func calculateAndSendFinalScore(subID string, latencies []float64, startNs, endNs int64) {
+func calculateAndPersistFinalScore(dbConn *pgx.Conn, subID string, latencies []float64, startNs, endNs int64) {
 	totalOrders := len(latencies)
 	if totalOrders == 0 {
 		fmt.Printf("[Ingester] No data collected for %s\n", subID)
@@ -207,27 +232,16 @@ func calculateAndSendFinalScore(subID string, latencies []float64, startNs, endN
 
 	fmt.Printf("[Final Score][%s] TPS: %.2f | p99: %.2fµs | CV: %.4f\n", subID, tps, p99, cv)
 
-	payload := map[string]interface{}{
-		"submissionId": subID,
-		"status":       "SUCCESS",
-		"tps":          tps,
-		"p50":          p50,
-		"p90":          p90,
-		"p99":          p99,
-		"cv":           cv,
-	}
+	// Direct DB Ingress: Writing straight to schema table using Postgres connection pool
+	query := `
+		UPDATE "Submission" 
+		SET status = 'SUCCESS', tps = $1, p50 = $2, p90 = $3, p99 = $4, cv = $5, "updatedAt" = NOW() 
+		WHERE id = $6`
 
-	jsonData, _ := json.Marshal(payload)
-
-	webURL := os.Getenv("WEB_URL")
-	if webURL == "" {
-		webURL = "http://localhost:3000"
-	}
-
-	resp, err := http.Post(webURL+"/api/results", "application/json", bytes.NewBuffer(jsonData))
+	_, err := dbConn.Exec(context.Background(), query, tps, p50, p90, p99, cv, subID)
 	if err != nil {
-		fmt.Printf("[Ingester] Failed to save final score to DB: %v\n", err)
+		fmt.Printf("[Database Error] Direct ingress write failure for submission %s: %v\n", subID, err)
 		return
 	}
-	defer resp.Body.Close()
+	fmt.Printf("[Database] Final benchmark results securely committed for run: %s\n", subID)
 }
