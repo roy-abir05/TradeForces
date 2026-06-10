@@ -32,27 +32,53 @@ export default function Home() {
     "Waiting for engine.cpp...",
   );
   const [metrics, setMetrics] = useState({ tps: 0, p50: 0, p90: 0, p99: 0 });
+  const [activeSubmissionId, setActiveSubmissionId] = useState<string | null>(
+    null,
+  );
 
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
-
   const [myHistory, setMyHistory] = useState<MySubmission[]>([]);
 
-  // The Polling Loop for Live Metrics
+  // The Direct WebSocket Connection to Go Hub
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch("/api/live");
-        if (res.ok) {
-          const data = await res.json();
-          setMetrics(data);
-        }
-      } catch (error) {
-        console.error("Failed to fetch live metrics");
-      }
-    }, 1000);
+    if (!activeSubmissionId) return;
 
-    return () => clearInterval(interval);
-  }, []);
+    console.log(
+      `[WebSocket] Connecting to Go Hub for submission: ${activeSubmissionId}`,
+    );
+    const ws = new WebSocket("ws://localhost:8081/ws");
+
+    ws.onopen = () => {
+      console.log("[WebSocket] Connected. Sending subscription handshake.");
+      ws.send(
+        JSON.stringify({
+          action: "subscribe",
+          submission_id: activeSubmissionId,
+        }),
+      );
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setMetrics({
+          tps: data.tps,
+          p50: data.p50,
+          p90: data.p90,
+          p99: data.p99,
+        });
+      } catch (err) {
+        console.error("[WebSocket] Parse Error:", err);
+      }
+    };
+
+    ws.onerror = (err) => console.error("[WebSocket] Connection Error:", err);
+    ws.onclose = () => console.log("[WebSocket] Connection Closed.");
+
+    return () => {
+      ws.close();
+    };
+  }, [activeSubmissionId]);
 
   // The Polling Loop for Leaderboard
   useEffect(() => {
@@ -104,9 +130,11 @@ export default function Home() {
   const handleDeploy = async () => {
     if (!file || !session) return;
     setDeployStatus("Uploading to TradeForces Orchestrator...");
+    setMetrics({ tps: 0, p50: 0, p90: 0, p99: 0 }); // Reset metrics for new run
+    setActiveSubmissionId(null); // Clear active socket
+
     const formData = new FormData();
     formData.append("engine", file);
-    // We will soon pass the user ID here to save to the database!
     formData.append("userId", session.user?.id as string);
 
     try {
@@ -114,11 +142,19 @@ export default function Home() {
         method: "POST",
         body: formData,
       });
-      if (response.ok)
+
+      if (response.ok) {
+        const data = await response.json();
+        // Set the active ID so the WebSocket useEffect triggers
+        if (data.submissionId) {
+          setActiveSubmissionId(data.submissionId);
+        }
         setDeployStatus(
-          "SUCCESS: Engine deployed to Sandbox. Attack Fleet standing by.",
+          "SUCCESS: Engine deployed to Sandbox. Telemetry locked.",
         );
-      else setDeployStatus("FAILED: Orchestrator rejected the payload.");
+      } else {
+        setDeployStatus("FAILED: Orchestrator rejected the payload.");
+      }
     } catch (error) {
       setDeployStatus("FAILED: Network error.");
     }
@@ -205,7 +241,7 @@ export default function Home() {
       <div className="max-w-2xl w-full border border-neutral-800 bg-black p-8 rounded-lg">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-bold text-white">
-            LIVE TELEMETRY (POLLING)
+            LIVE TELEMETRY (WSS DIRECT)
           </h2>
         </div>
 
