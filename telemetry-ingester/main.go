@@ -29,6 +29,7 @@ type LiveMetrics struct {
 	P50          int64  `json:"p50"`
 	P90          int64  `json:"p90"`
 	P99          int64  `json:"p99"`
+	Status       string `json:"status,omitempty"`
 }
 
 var upgrader = websocket.Upgrader{
@@ -119,13 +120,20 @@ func main() {
 			if record.Status == "END_OF_RUN" {
 				fmt.Printf("[Ingester] END_OF_RUN received for %s. Calculating final score...\n", subID)
 
-				calculateAndPersistFinalScore(
+				finalMetrics, err := calculateAndPersistFinalScore(
 					dbConn,
 					subID,
 					globalLatencies[subID],
 					runStartTimes[subID],
 					record.Timestamp,
 				)
+
+				if err != nil {
+					fmt.Printf("[Ingester Error][%s] %v\n", subID, err)
+				} else {
+					finalMetrics.Status = "COMPLETE"
+					hub.broadcast <- finalMetrics
+				}
 
 				delete(currentWindows, subID)
 				delete(globalLatencies, subID)
@@ -183,11 +191,10 @@ func readKafka(kafkaReader *kafka.Reader, recordChan chan TelemetryRecord) {
 	}
 }
 
-func calculateAndPersistFinalScore(dbConn *pgx.Conn, subID string, latencies []float64, startNs, endNs int64) {
+func calculateAndPersistFinalScore(dbConn *pgx.Conn, subID string, latencies []float64, startNs, endNs int64) (LiveMetrics, error) {
 	totalOrders := len(latencies)
 	if totalOrders == 0 {
-		fmt.Printf("[Ingester] No data collected for %s\n", subID)
-		return
+		return LiveMetrics{}, fmt.Errorf("no telemetry data collected for %s", subID)
 	}
 
 	sort.Float64s(latencies)
@@ -244,15 +251,22 @@ func calculateAndPersistFinalScore(dbConn *pgx.Conn, subID string, latencies []f
 
 	_, err := dbConn.Exec(context.Background(), resultQuery, subID, int(tps), p50, p90, p99, cv)
 	if err != nil {
-		fmt.Printf("[Database Error] Direct ingress write failure for Result table %s: %v\n", subID, err)
-		return
+		return LiveMetrics{}, fmt.Errorf("DB Result write failed: %w", err)
 	}
 
 	submissionQuery := `UPDATE "Submission" SET status = 'SUCCESS' WHERE id = $1`
 	_, err = dbConn.Exec(context.Background(), submissionQuery, subID)
 	if err != nil {
-		fmt.Printf("[Database Error] Direct ingress write failure for Submission table %s: %v\n", subID, err)
-		return
+		return LiveMetrics{}, fmt.Errorf("DB Submission update failed: %w", err)
 	}
+
 	fmt.Printf("[Database] Final benchmark results securely committed for run: %s\n", subID)
+
+	return LiveMetrics{
+		SubmissionID: subID,
+		TPS:          int64(tps),
+		P50:          int64(p50),
+		P90:          int64(p90),
+		P99:          int64(p99),
+	}, nil
 }

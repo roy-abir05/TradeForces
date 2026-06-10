@@ -43,8 +43,11 @@ export default function Home() {
   useEffect(() => {
     if (!activeSubmissionId) return;
 
-    const currentRun = myHistory.find(sub => sub.id === activeSubmissionId);
-    if (currentRun && (currentRun.status === "SUCCESS" || currentRun.status === "FAILED")) {
+    const currentRun = myHistory.find((sub) => sub.id === activeSubmissionId);
+    if (
+      currentRun &&
+      (currentRun.status === "SUCCESS" || currentRun.status === "FAILED")
+    ) {
       console.log("[UI] Run complete. Freezing telemetry board.");
       return;
     }
@@ -67,6 +70,23 @@ export default function Home() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+
+        if (data.status === "COMPLETE") {
+          console.log(
+            "[WebSocket] Received COMPLETE signal. Severing connection.",
+          );
+
+          setMetrics({
+            tps: data.tps,
+            p50: data.p50,
+            p90: data.p90,
+            p99: data.p99,
+          });
+
+          ws.close();
+          setDeployStatus("SUCCESS: Benchmark Complete. Telemetry Locked.");
+          return;
+        }
         setMetrics({
           tps: data.tps,
           p50: data.p50,
