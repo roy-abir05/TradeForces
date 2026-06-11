@@ -104,15 +104,6 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 	hostPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 	listener.Close()
 
-	reader, err := o.dockerClient.ImagePull(ctx, "docker.io/library/gcc:latest", client.ImagePullOptions{})
-	if err != nil {
-		os.RemoveAll(tempDir)
-		log.Printf("[%s] Image pull failed: %v", subID[:8], err)
-		return
-	}
-	defer reader.Close()
-	io.Copy(os.Stdout, reader)
-
 	hostPath := tempDir
 	containerPath := "/usr/src/app"
 
@@ -324,6 +315,16 @@ func main() {
 	}
 	defer dockerClient.Close()
 	fmt.Println("[Orchestrator] Docker client initialized.")
+
+	fmt.Println("[Orchestrator] Pre-flight check: Verifying gcc:latest image is cached locally...")
+	pullCtx := context.Background()
+	reader, err := dockerClient.ImagePull(pullCtx, "docker.io/library/gcc:latest", client.ImagePullOptions{})
+	if err != nil {
+		log.Fatalf("[Docker] Failed to pull sandbox image: %v", err)
+	}
+	io.Copy(os.Stdout, reader)
+	reader.Close()
+	fmt.Println("[Orchestrator] Sandbox image verified. Ready for execution.")
 
 	maxWorkers := 12
 	if mwStr := os.Getenv("MAX_WORKERS"); mwStr != "" {
