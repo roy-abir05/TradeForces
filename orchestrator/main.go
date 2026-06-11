@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -341,7 +342,8 @@ func main() {
 	go orch.dispatcher()
 
 	http.HandleFunc("/deploy", orch.deployHandler)
-
 	fmt.Printf("[Orchestrator] Listening on http://localhost:8080 (Max Workers: %d)\n", maxWorkers)
 	log.Fatal(http.ListenAndServe(":8080", nil))
+
+	http.Handle("/metrics", promhttp.Handler())
 }
