@@ -87,6 +87,11 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 		return
 	}
 
+	if err := os.Chmod(tempDir, 0777); err != nil {
+		log.Printf("[%s] Failed to chmod temp directory: %v", subID[:8], err)
+		return
+	}
+
 	sourcePath := filepath.Join(tempDir, "server.cpp")
 	if err := os.WriteFile(sourcePath, []byte(payload.Code), 0644); err != nil {
 		os.RemoveAll(tempDir)
