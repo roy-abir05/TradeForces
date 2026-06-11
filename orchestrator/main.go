@@ -78,24 +78,24 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 
 	_, err := o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'RUNNING' WHERE id = $1`, subID)
 	if err != nil {
-		fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:8], err)
+		fmt.Printf("[Orchestrator][%s] DB Update Error: %v\n", subID[:16], err)
 	}
 
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("tradeforces-sub-%s-*", subID[:8]))
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("tradeforces-sub-%s-*", subID[:16]))
 	if err != nil {
-		log.Printf("[%s] Failed to create temp directory: %v", subID[:8], err)
+		log.Printf("[%s] Failed to create temp directory: %v", subID[:16], err)
 		return
 	}
 
 	if err := os.Chmod(tempDir, 0777); err != nil {
-		log.Printf("[%s] Failed to chmod temp directory: %v", subID[:8], err)
+		log.Printf("[%s] Failed to chmod temp directory: %v", subID[:16], err)
 		return
 	}
 
 	sourcePath := filepath.Join(tempDir, "server.cpp")
 	if err := os.WriteFile(sourcePath, []byte(payload.Code), 0644); err != nil {
 		os.RemoveAll(tempDir)
-		log.Printf("[%s] Failed to write code: %v", subID[:8], err)
+		log.Printf("[%s] Failed to write code: %v", subID[:16], err)
 		return
 	}
 
@@ -103,7 +103,7 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		os.RemoveAll(tempDir)
-		log.Printf("[%s] Failed to allocate dynamic port: %v", subID[:8], err)
+		log.Printf("[%s] Failed to allocate dynamic port: %v", subID[:16], err)
 		return
 	}
 	hostPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
@@ -155,22 +155,22 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 	})
 	if err != nil {
 		os.RemoveAll(tempDir)
-		log.Printf("[%s] Failed to create container: %v", subID[:8], err)
+		log.Printf("[%s] Failed to create container: %v", subID[:16], err)
 		return
 	}
 
 	defer func() {
 		os.RemoveAll(tempDir)
 		exec.Command("docker", "rm", "-f", resp.ID).Run()
-		fmt.Printf("[Orchestrator][%s] Cleanup complete.\n", subID[:8])
+		fmt.Printf("[Orchestrator][%s] Cleanup complete.\n", subID[:16])
 	}()
 
 	if _, err := o.dockerClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
-		log.Printf("[%s] Failed to start container: %v", subID[:8], err)
+		log.Printf("[%s] Failed to start container: %v", subID[:16], err)
 		return
 	}
 
-	fmt.Printf("[Orchestrator][%s] Engine running on dynamically allocated port %s\n", subID[:8], hostPort)
+	fmt.Printf("[Orchestrator][%s] Engine running on dynamically allocated port %s\n", subID[:16], hostPort)
 
 	targetAddress := fmt.Sprintf("127.0.0.1:%s", hostPort)
 	engineReady := false
@@ -196,7 +196,7 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 	}
 
 	if !engineReady {
-		fmt.Printf("[Orchestrator][%s] FATAL: Engine failed to bind to port %s within 5 seconds.\n", subID[:8], hostPort)
+		fmt.Printf("[Orchestrator][%s] FATAL: Engine failed to bind to port %s within 5 seconds.\n", subID[:16], hostPort)
 		logCmd := exec.Command("docker", "logs", resp.ID)
 		logCmd.Stdout = os.Stdout
 		logCmd.Stderr = os.Stderr
@@ -206,11 +206,11 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 		return
 	}
 
-	fmt.Printf("[Orchestrator][%s] Target Lock Acquired. Unleashing load generator...\n", subID[:8])
+	fmt.Printf("[Orchestrator][%s] Target Lock Acquired. Unleashing load generator...\n", subID[:16])
 
 	entries, err := os.ReadDir("./profiles")
 	if err != nil {
-		log.Printf("[%s] Failed to read profiles directory: %v", subID[:8], err)
+		log.Printf("[%s] Failed to read profiles directory: %v", subID[:16], err)
 		return
 	}
 	wait := o.dockerClient.ContainerWait(ctx, resp.ID, client.ContainerWaitOptions{
@@ -222,11 +222,11 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 			continue
 		}
 
-		fmt.Printf("[Orchestrator][%s] Running Test Case: %s\n", subID[:8], entry.Name())
+		// fmt.Printf("[Orchestrator][%s] Running Test Case: %s\n", subID[:16], entry.Name())
 
 		yamlData, err := os.ReadFile(filepath.Join("./profiles", entry.Name()))
 		if err != nil {
-			log.Printf("[%s] Failed to read profile %s: %v", subID[:8], entry.Name(), err)
+			log.Printf("[%s] Failed to read profile %s: %v", subID[:16], entry.Name(), err)
 			continue
 		}
 
@@ -256,11 +256,11 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 		select {
 		case err := <-attackDone:
 			if err != nil {
-				fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:8], entry.Name(), err)
+				fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:16], entry.Name(), err)
 				testFailed = true
 				o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
 			} else {
-				fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:8], entry.Name())
+				fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:16], entry.Name())
 			}
 
 		case waitResp := <-wait.Result:
@@ -270,9 +270,9 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 			verdict := "RE"
 			if waitResp.StatusCode == 137 {
 				verdict = "MLE"
-				fmt.Printf("[Orchestrator][%s] FATAL: Memory Limit Exceeded on %s.\n", subID[:8], entry.Name())
+				fmt.Printf("[Orchestrator][%s] FATAL: Memory Limit Exceeded on %s.\n", subID[:16], entry.Name())
 			} else {
-				fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d) on %s.\n", subID[:8], waitResp.StatusCode, entry.Name())
+				fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d) on %s.\n", subID[:16], waitResp.StatusCode, entry.Name())
 			}
 			testFailed = true
 			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = $1 WHERE id = $2`, verdict, subID)
@@ -281,12 +281,12 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 			if cmd.Process != nil {
 				cmd.Process.Kill()
 			}
-			fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded on %s.\n", subID[:8], entry.Name())
+			fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded on %s.\n", subID[:16], entry.Name())
 			testFailed = true
 			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'TLE' WHERE id = $1`, subID)
 
 		case err := <-wait.Error:
-			fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:8], err)
+			fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:16], err)
 			testFailed = true
 			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
 		}
@@ -296,7 +296,7 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 		}
 	}
 
-	fmt.Printf("[Orchestrator][%s] All test cases passed.\n", subID[:8])
+	fmt.Printf("[Orchestrator][%s] All test cases passed.\n", subID[:16])
 }
 
 func main() {

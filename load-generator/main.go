@@ -62,6 +62,7 @@ func main() {
 	if submissionID == "" {
 		log.Fatal("FATAL: SUBMISSION_ID environment variable not set")
 	}
+	// subID := submissionID[:16]
 
 	chaosJSON := os.Getenv("CHAOS_PROFILE")
 	if chaosJSON == "" {
@@ -86,7 +87,7 @@ func main() {
 
 	workers := 100
 
-	fmt.Printf("Deploying %d workers for Gauntlet: %s\n", workers, currentProfile.Name)
+	// fmt.Printf("[%s] Deploying %d workers for Gauntlet: %s\n", subID, workers, currentProfile.Name)
 
 	attackTokens := make(chan int, 100000)
 	for i := 0; i < workers; i++ {
@@ -96,7 +97,7 @@ func main() {
 
 	tokenID := 0
 	for _, phase := range currentProfile.Phases {
-		fmt.Printf("Starting Phase: %s\n", phase.Name)
+		// fmt.Printf("Starting Phase: %s\n", phase.Name)
 
 		state := &AtomicPhaseState{
 			BuyWt:    phase.Distribution.Buy,
@@ -130,7 +131,7 @@ func main() {
 	wg.Wait()
 	kafkaWG.Wait()
 
-	fmt.Println("Fleet attack complete. All telemetry data pushed to Redpanda.")
+	// fmt.Printf("[%s] Fleet attack complete. All telemetry data pushed to Redpanda.", subID)
 
 	endRecord := TelemetryRecord{
 		SubmissionID: submissionID,
@@ -156,9 +157,11 @@ func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg
 		targetPort = "1337"
 	}
 
+	// subID := submissionID[:16]
+
 	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", targetPort))
 	if err != nil {
-		log.Printf("Worker %d failed to connect: %v\n", workerID, err)
+		// log.Printf("[%s] Worker %d failed to connect: %v\n", subID, workerID, err)
 		return
 	}
 	defer conn.Close()
@@ -205,7 +208,7 @@ func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg
 
 		_, err := reader.ReadString('\n')
 		if err != nil {
-			log.Printf("Worker %d connection dropped.\n", workerID)
+			// log.Printf("[%s] Worker %d connection dropped.\n", subID, workerID)
 			break
 		}
 
@@ -233,7 +236,7 @@ func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg
 				},
 			)
 			if err != nil {
-				log.Printf("Worker %d failed to write to Kafka: %v\n", wID, err)
+				// log.Printf("[%s] Worker %d failed to write to Kafka: %v\n", subID, wID, err)
 			}
 		}(jsonData, workerID)
 	}
