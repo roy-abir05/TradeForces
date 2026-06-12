@@ -310,6 +310,27 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 	fmt.Printf("[Orchestrator][%s] All test cases passed.\n", subID[:16])
 }
 
+func (o *Orchestrator) startJanitor() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	fmt.Println("[Janitor] Scheduled garbage collection initialized (1-hour intervals).")
+
+	for range ticker.C {
+		fmt.Println("[Janitor] Waking up. Executing routine Docker system prune...")
+
+		cmd := exec.Command("docker", "system", "prune", "-f", "--volumes")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("[Janitor] Warning: Prune command failed: %v\n", err)
+		} else {
+			fmt.Println("[Janitor] Host machine sanitized. Going back to sleep.")
+		}
+	}
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -357,6 +378,7 @@ func main() {
 	}
 
 	go orch.dispatcher()
+	go orch.startJanitor()
 
 	http.HandleFunc("/deploy", orch.deployHandler)
 	fmt.Printf("[Orchestrator] Listening on http://localhost:8080 (Max Workers: %d)\n", maxWorkers)
