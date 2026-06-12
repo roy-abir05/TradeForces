@@ -380,37 +380,7 @@ export default function Home() {
               ) : (
                 <div className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
                   {myHistory.map((sub) => (
-                    <div
-                      key={sub.id}
-                      className="flex flex-col p-3 rounded-sm border border-zinc-800/50 bg-black hover:border-zinc-700 transition-colors gap-2"
-                    >
-                      <div className="flex justify-between items-center">
-                        <span className="text-zinc-500 text-xs font-mono">
-                          {new Date(sub.createdAt).toLocaleTimeString()}
-                        </span>
-                        <StatusBadge status={sub.status} />
-                      </div>
-                      {sub.result && (
-                        <div className="flex justify-between items-end border-t border-zinc-900 pt-2 mt-1">
-                          <div>
-                            <div className="text-[10px] text-zinc-600 uppercase">
-                              TPS
-                            </div>
-                            <div className="text-sm text-white font-mono">
-                              {sub.result.tps.toLocaleString()}
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <div className="text-[10px] text-zinc-600 uppercase">
-                              p99
-                            </div>
-                            <div className="text-sm text-zinc-300 font-mono">
-                              {sub.result.p99}µs
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    <HistoryCard key={sub.id} sub={sub} />
                   ))}
                 </div>
               )}
@@ -638,5 +608,82 @@ function StatusBadge({ status }: { status: string }) {
     >
       {status}
     </span>
+  );
+}
+
+function HistoryCard({ sub }: { sub: MySubmission }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (!sub.result) return;
+
+    // The Gamified Flex String
+    const text = `🏆 TRADEFORCES GAUNTLET CLEARED 🏆
+⏱️ Throughput: ${sub.result.tps.toLocaleString()} TPS
+⚡ p99 Latency: ${sub.result.p99}µs
+
+Can your engine survive the onslaught?`;
+
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000); // Reset after 2 seconds
+  };
+
+  const isFailed = ["FAILED", "MLE", "TLE", "RE"].includes(sub.status);
+
+  return (
+    <div className="flex flex-col p-3 rounded-sm border border-zinc-800/50 bg-black hover:border-zinc-700 transition-colors gap-2">
+      <div className="flex justify-between items-center">
+        <span className="text-zinc-500 text-xs font-mono">
+          {new Date(sub.createdAt).toLocaleTimeString()}
+        </span>
+        <StatusBadge status={sub.status} />
+      </div>
+
+      {sub.result && (
+        <div className="flex justify-between items-end border-t border-zinc-900 pt-2 mt-1">
+          <div>
+            <div className="text-[10px] text-zinc-600 uppercase">TPS</div>
+            <div className="text-sm text-white font-mono">
+              {sub.result.tps.toLocaleString()}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] text-zinc-600 uppercase">p99</div>
+            <div className="text-sm text-zinc-300 font-mono">
+              {sub.result.p99}µs
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(sub.status === "SUCCESS" || isFailed) && (
+        <div className="flex justify-end pt-2 border-t border-zinc-900/50 mt-1">
+          {sub.status === "SUCCESS" && sub.result ? (
+            <button
+              onClick={handleCopy}
+              className={`text-[10px] uppercase tracking-widest font-bold px-3 py-1.5 rounded-sm transition-colors flex items-center gap-1 ${
+                copied
+                  ? "bg-emerald-950/50 text-emerald-400 border border-emerald-900/50"
+                  : "bg-zinc-900 hover:bg-zinc-800 text-zinc-300"
+              }`}
+            >
+              {copied ? "COPIED TO CLIPBOARD ✓" : "COPY METRICS"}
+            </button>
+          ) : isFailed ? (
+            <button
+              onClick={() =>
+                alert(
+                  "Mock Sandbox Logs:\n[FATAL] Container crashed.\n[ERROR] Worker connection dropped. Mutex panic on LOB insertion.",
+                )
+              }
+              className="text-[10px] uppercase tracking-widest font-bold px-3 py-1.5 bg-rose-950/20 hover:bg-rose-900/40 text-rose-400 border border-rose-900/30 rounded-sm transition-colors"
+            >
+              VIEW LOGS
+            </button>
+          ) : null}
+        </div>
+      )}
+    </div>
   );
 }
