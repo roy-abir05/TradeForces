@@ -156,6 +156,13 @@ export default function Home() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
+      // 500KB Size Limit Check
+      if (e.target.files[0].size > 500 * 1024) {
+        setDeployStatus("REJECTED: FILE EXCEEDS 50KB LIMIT");
+        setFile(null);
+        return;
+      }
+
       setFile(e.target.files[0]);
       setDeployStatus(`READY: ${e.target.files[0].name.toUpperCase()}`);
     }
