@@ -73,6 +73,8 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 	defer func() { <-o.workerSem }()
 
 	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 	subID := payload.SubmissionID
 	fmt.Printf("\n[Orchestrator] Starting processing for Submission: %s\n", subID)
 
@@ -235,7 +237,7 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 
 		jsonProfileBytes, _ := json.Marshal(profileMap)
 
-		cmd := exec.Command("go", "run", "main.go")
+		cmd := exec.CommandContext(ctx, "go", "run", "main.go")
 		cmd.Dir = "../load-generator"
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -258,7 +260,7 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 			if err != nil {
 				fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:16], entry.Name(), err)
 				testFailed = true
-				o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
+				o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
 			} else {
 				fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:16], entry.Name())
 			}
@@ -275,20 +277,29 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 				fmt.Printf("[Orchestrator][%s] FATAL: Runtime Error (Exit Code %d) on %s.\n", subID[:16], waitResp.StatusCode, entry.Name())
 			}
 			testFailed = true
-			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = $1 WHERE id = $2`, verdict, subID)
+			o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = $1 WHERE id = $2`, verdict, subID)
 
 		case <-timeout:
 			if cmd.Process != nil {
 				cmd.Process.Kill()
 			}
-			fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded on %s.\n", subID[:16], entry.Name())
+			fmt.Printf("[Orchestrator][%s] FATAL: Time Limit Exceeded (Test Profile) on %s.\n", subID[:16], entry.Name())
 			testFailed = true
-			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'TLE' WHERE id = $1`, subID)
+			o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'TLE' WHERE id = $1`, subID)
 
 		case err := <-wait.Error:
-			fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:16], err)
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+
+			if ctx.Err() == context.DeadlineExceeded {
+				fmt.Printf("[Orchestrator][%s] FATAL: 5-MINUTE GLOBAL TIMEOUT. Worker slot forcefully reclaimed.\n", subID[:16])
+				o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'TLE' WHERE id = $1`, subID)
+			} else {
+				fmt.Printf("[Orchestrator][%s] Docker API Error: %v\n", subID[:16], err)
+				o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
+			}
 			testFailed = true
-			o.dbPool.Exec(ctx, `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
 		}
 
 		if testFailed {
