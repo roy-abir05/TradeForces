@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../lib/prisma";
 
-export const dynamic = "force-dynamic"; // Prevents Next.js from caching the leaderboard aggressively
+export const revalidate = 10;
 
 export async function GET() {
   try {
