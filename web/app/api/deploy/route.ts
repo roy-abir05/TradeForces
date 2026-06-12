@@ -3,8 +3,74 @@ import { prisma } from "../../../lib/prisma";
 
 const MAX_FILE_SIZE = 500 * 1024; // 500KB
 
+interface RateLimitData {
+  attempts: number;
+  windowStart: number;
+  penaltyUntil: number;
+}
+const rateLimitMap = new Map<string, RateLimitData>();
+
+const MAX_ATTEMPTS = 10; // Allow 5 submissions...
+const WINDOW_MS = 60 * 1000; // ...within any 1-minute window
+const PENALTY_MS = 5 * 60 * 1000; // 5-minute ban if they spam
+
 export async function POST(request: Request) {
   try {
+    // Rate Limiter
+    const userId = request.headers.get("x-user-id");
+
+    if (!userId) {
+      return NextResponse.json(
+        { success: false, error: "Missing x-user-id header" },
+        { status: 400 },
+      );
+    }
+
+    const now = Date.now();
+    const userStats = rateLimitMap.get(userId) || {
+      attempts: 0,
+      windowStart: now,
+      penaltyUntil: 0,
+    };
+
+    if (now < userStats.penaltyUntil) {
+      const remainingMinutes = Math.ceil(
+        (userStats.penaltyUntil - now) / 60000,
+      );
+      console.warn(`[Firewall] Blocked penalized user: ${userId}`);
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Spam detected. Banned for ${remainingMinutes} minute(s).`,
+        },
+        { status: 429 },
+      );
+    }
+
+    if (now - userStats.windowStart > WINDOW_MS) {
+      userStats.attempts = 0;
+      userStats.windowStart = now;
+    }
+
+    userStats.attempts += 1;
+
+    if (userStats.attempts > MAX_ATTEMPTS) {
+      userStats.penaltyUntil = now + PENALTY_MS;
+      rateLimitMap.set(userId, userStats);
+      console.warn(
+        `[Firewall] User ${userId} spamming. Sent to 5-minute penalty box.`,
+      );
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Too many requests. You are blocked for 5 minutes.",
+        },
+        { status: 429 },
+      );
+    }
+
+    rateLimitMap.set(userId, userStats);
+
     const contentLengthHeader = request.headers.get("content-length");
     if (contentLengthHeader) {
       const contentLength = parseInt(contentLengthHeader, 10);
@@ -19,7 +85,6 @@ export async function POST(request: Request) {
       }
     }
 
-    // File Size Limit Check
     const streamClone = request.clone();
     const reader = streamClone.body?.getReader();
 
@@ -64,11 +129,10 @@ export async function POST(request: Request) {
 
     const data = await request.formData();
     const file: File | null = data.get("engine") as unknown as File;
-    const userId = data.get("userId") as string;
 
-    if (!file || !userId) {
+    if (!file) {
       return NextResponse.json(
-        { success: false, error: "Missing file or user ID" },
+        { success: false, error: "Missing file" },
         { status: 400 },
       );
     }
@@ -101,6 +165,9 @@ export async function POST(request: Request) {
         where: { id: submission.id },
         data: { status: "FAILED" },
       });
+      // Revert lock on orchestrator failure
+      userStats.attempts = Math.max(0, userStats.attempts - 1);
+      rateLimitMap.set(userId, userStats);
       throw new Error("Go Orchestrator failed to boot container");
     }
 

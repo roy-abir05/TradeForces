@@ -182,6 +182,9 @@ export default function Home() {
     try {
       const response = await fetch("/api/deploy", {
         method: "POST",
+        headers: {
+          "x-user-id": session.user?.id as string,
+        },
         body: formData,
       });
       if (response.ok) {
