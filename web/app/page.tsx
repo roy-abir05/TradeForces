@@ -218,6 +218,27 @@ export default function Home() {
     }
   };
 
+  // Global Keyboard Shortcut (The "Trader" Experience)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Listen for Ctrl+Enter (Windows/Linux) or Cmd+Enter (Mac)
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+
+        const isCurrentlyRunning =
+          deployStatus.includes("EXECUTING") ||
+          deployStatus.includes("UPLOADING");
+
+        if (file && session && !isOffline && !isCurrentlyRunning) {
+          handleDeploy();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [file, session, isOffline, deployStatus]);
+
   if (status === "loading") {
     return (
       <main className="min-h-screen bg-black text-white font-sans flex items-center justify-center">
@@ -316,14 +337,21 @@ export default function Home() {
 
                 <button
                   onClick={handleDeploy}
-                  disabled={!file || isOffline} // NEW: Disable if offline
-                  className={`w-full py-3 text-sm font-bold tracking-widest uppercase rounded-sm transition-all ${
+                  disabled={!file || isOffline}
+                  className={`w-full flex items-center justify-center gap-2 py-3 text-sm font-bold tracking-widest uppercase rounded-sm transition-all ${
                     file && !isOffline
                       ? "bg-white text-black hover:bg-zinc-200"
                       : "bg-zinc-900 text-zinc-600 cursor-not-allowed"
                   }`}
                 >
-                  {isOffline ? "SYSTEM OFFLINE" : "Initiate Attack"}
+                  <span>
+                    {isOffline ? "SYSTEM OFFLINE" : "Initiate Attack"}
+                  </span>
+                  {!isOffline && file && (
+                    <span className="text-[10px] bg-zinc-200/50 text-black px-1.5 py-0.5 rounded-sm font-mono ml-2">
+                      Ctrl/⌘ + ↵
+                    </span>
+                  )}
                 </button>
 
                 <div className="flex items-center gap-2 mt-2">
