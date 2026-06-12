@@ -53,6 +53,8 @@ export default function Home() {
     null,
   );
 
+  const [isOffline, setIsOffline] = useState<boolean>(false);
+
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [myHistory, setMyHistory] = useState<MySubmission[]>([]);
 
@@ -70,8 +72,10 @@ export default function Home() {
     }
 
     const ws = new WebSocket("ws://localhost:8081/ws");
+    let isNormalClose = false; // NEW: Track intentional closures
 
     ws.onopen = () => {
+      setIsOffline(false); // NEW: Reset offline status on reconnect
       ws.send(
         JSON.stringify({
           action: "subscribe",
@@ -93,6 +97,7 @@ export default function Home() {
         const newPoint = { time: now, tps: data.tps, p99: data.p99 };
 
         if (data.status === "COMPLETE") {
+          isNormalClose = true; // NEW: Mark closure as intentional
           setMetrics({
             tps: data.tps,
             p50: data.p50,
@@ -117,10 +122,24 @@ export default function Home() {
       }
     };
 
-    ws.onerror = (err) => console.error("[WebSocket] Connection Error:", err);
-    ws.onclose = () => console.log("[WebSocket] Connection Closed.");
+    ws.onerror = (err) => {
+      console.error("[WebSocket] Connection Error:", err);
+      setIsOffline(true); // NEW: Trigger offline state
+    };
 
-    return () => ws.close();
+    ws.onclose = () => {
+      console.log("[WebSocket] Connection Closed.");
+      // NEW: If it closed but wasn't COMPLETE, the server dropped.
+      if (!isNormalClose) {
+        setIsOffline(true);
+        setDeployStatus("FATAL: WEBSOCKET DISCONNECT");
+      }
+    };
+
+    return () => {
+      isNormalClose = true; // Prevent unmount from triggering error state
+      ws.close();
+    };
   }, [activeSubmissionId]);
 
   // Polling Loops
@@ -213,6 +232,13 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-black text-zinc-300 font-sans p-4 md:p-8 flex flex-col gap-8 selection:bg-zinc-800">
+      {/* OFFLINE TOAST */}
+      {isOffline && (
+        <div className="fixed top-4 right-4 z-50 bg-rose-950 border border-rose-900 text-rose-400 px-4 py-2 rounded-sm text-xs font-mono tracking-widest flex items-center gap-2 shadow-xl animate-pulse">
+          <div className="w-2 h-2 rounded-full bg-rose-500"></div>
+          Reconnecting to TradeForces Hub...
+        </div>
+      )}
       {/* HEADER NAVIGATION */}
       <header className="flex justify-between items-end border-b border-zinc-800 pb-4">
         <div>
@@ -290,14 +316,14 @@ export default function Home() {
 
                 <button
                   onClick={handleDeploy}
-                  disabled={!file}
+                  disabled={!file || isOffline} // NEW: Disable if offline
                   className={`w-full py-3 text-sm font-bold tracking-widest uppercase rounded-sm transition-all ${
-                    file
+                    file && !isOffline
                       ? "bg-white text-black hover:bg-zinc-200"
                       : "bg-zinc-900 text-zinc-600 cursor-not-allowed"
                   }`}
                 >
-                  Initiate Attack
+                  {isOffline ? "SYSTEM OFFLINE" : "Initiate Attack"}
                 </button>
 
                 <div className="flex items-center gap-2 mt-2">
