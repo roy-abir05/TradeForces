@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -72,11 +72,11 @@ func main() {
 	if dbURL == "" {
 		dbURL = "postgresql://tradeforces:supersecretpassword@localhost:5433/tradeforces_db?sslmode=disable"
 	}
-	dbConn, err := pgx.Connect(context.Background(), dbURL)
+	dbPool, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
 		log.Fatalf("[Database] Unable to connect to PostgreSQL: %v", err)
 	}
-	defer dbConn.Close(context.Background())
+	defer dbPool.Close()
 	fmt.Println("[Database] Connected directly to PostgreSQL database.")
 
 	// Spin up Actor Hub
@@ -106,74 +106,30 @@ func main() {
 	recordChan := make(chan TelemetryRecord, 50000)
 	go readKafka(kafkaReader, recordChan)
 
-	ticker := time.NewTicker(time.Second)
+	workers := make(map[string]chan TelemetryRecord)
 
-	currentWindows := make(map[string][]int64)
-	globalLatencies := make(map[string][]float64)
-	runStartTimes := make(map[string]int64)
+	tombstones := make(map[string]bool)
 
-	for {
-		select {
-		case record := <-recordChan:
-			subID := record.SubmissionID
+	for record := range recordChan {
+		subID := record.SubmissionID
 
-			if record.Status == "END_OF_RUN" {
-				fmt.Printf("[Ingester] END_OF_RUN received for %s. Calculating final score...\n", subID)
+		if tombstones[subID] {
+			continue
+		}
 
-				finalMetrics, err := calculateAndPersistFinalScore(
-					dbConn,
-					subID,
-					globalLatencies[subID],
-					runStartTimes[subID],
-					record.Timestamp,
-				)
+		workerChan, exists := workers[subID]
+		if !exists {
 
-				if err != nil {
-					fmt.Printf("[Ingester Error][%s] %v\n", subID, err)
-				} else {
-					finalMetrics.Status = "COMPLETE"
-					hub.broadcast <- finalMetrics
-				}
+			workerChan = make(chan TelemetryRecord, 10000)
+			workers[subID] = workerChan
+			go submissionWorker(subID, workerChan, hub, dbPool)
+		}
 
-				delete(currentWindows, subID)
-				delete(globalLatencies, subID)
-				delete(runStartTimes, subID)
-				continue
-			}
+		workerChan <- record
 
-			if _, exists := runStartTimes[subID]; !exists || record.Timestamp < runStartTimes[subID] {
-				runStartTimes[subID] = record.Timestamp
-			}
-
-			currentWindows[subID] = append(currentWindows[subID], record.LatencyNs)
-			globalLatencies[subID] = append(globalLatencies[subID], float64(record.LatencyNs))
-
-		case <-ticker.C:
-			for subID, window := range currentWindows {
-				if len(window) == 0 {
-					continue
-				}
-
-				sort.Slice(window, func(i, j int) bool { return window[i] < window[j] })
-				requests := int64(len(window))
-
-				p50 := window[int(float64(requests)*0.50)] / 1000
-				p90 := window[int(float64(requests)*0.90)] / 1000
-				p99 := window[int(float64(requests)*0.99)] / 1000
-
-				metrics := LiveMetrics{
-					SubmissionID: subID,
-					TPS:          requests,
-					P50:          p50,
-					P90:          p90,
-					P99:          p99,
-				}
-
-				// Ship metric payload straight down the Actor Model Hub channel
-				hub.broadcast <- metrics
-
-				currentWindows[subID] = nil
-			}
+		if record.Status == "END_OF_RUN" {
+			delete(workers, subID)
+			tombstones[subID] = true
 		}
 	}
 }
@@ -191,7 +147,70 @@ func readKafka(kafkaReader *kafka.Reader, recordChan chan TelemetryRecord) {
 	}
 }
 
-func calculateAndPersistFinalScore(dbConn *pgx.Conn, subID string, latencies []float64, startNs, endNs int64) (LiveMetrics, error) {
+func submissionWorker(subID string, recordChan <-chan TelemetryRecord, hub *Hub, dbPool *pgxpool.Pool) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	var currentWindow []int64
+	var globalLatencies []float64
+	var startNs int64
+
+	for {
+		select {
+		case record, ok := <-recordChan:
+			if !ok {
+				return
+			}
+
+			if record.Status == "END_OF_RUN" {
+				fmt.Printf("[Ingester Worker] END_OF_RUN received for %s. Calculating score...\n", subID)
+
+				finalMetrics, err := calculateAndPersistFinalScore(
+					dbPool, subID, globalLatencies, startNs, record.Timestamp,
+				)
+
+				if err != nil {
+					fmt.Printf("[Ingester Error][%s] %v\n", subID, err)
+				} else {
+					finalMetrics.Status = "COMPLETE"
+					hub.broadcast <- finalMetrics
+				}
+				return
+			}
+
+			if startNs == 0 || record.Timestamp < startNs {
+				startNs = record.Timestamp
+			}
+
+			currentWindow = append(currentWindow, record.LatencyNs)
+			globalLatencies = append(globalLatencies, float64(record.LatencyNs))
+
+		case <-ticker.C:
+			if len(currentWindow) == 0 {
+				continue
+			}
+
+			sort.Slice(currentWindow, func(i, j int) bool { return currentWindow[i] < currentWindow[j] })
+			requests := int64(len(currentWindow))
+
+			p50 := currentWindow[int(float64(requests)*0.50)] / 1000
+			p90 := currentWindow[int(float64(requests)*0.90)] / 1000
+			p99 := currentWindow[int(float64(requests)*0.99)] / 1000
+
+			hub.broadcast <- LiveMetrics{
+				SubmissionID: subID,
+				TPS:          requests,
+				P50:          p50,
+				P90:          p90,
+				P99:          p99,
+			}
+
+			currentWindow = nil
+		}
+	}
+}
+
+func calculateAndPersistFinalScore(dbPool *pgxpool.Pool, subID string, latencies []float64, startNs, endNs int64) (LiveMetrics, error) {
 	totalOrders := len(latencies)
 	if totalOrders == 0 {
 		return LiveMetrics{}, fmt.Errorf("no telemetry data collected for %s", subID)
@@ -249,13 +268,13 @@ func calculateAndPersistFinalScore(dbConn *pgx.Conn, subID string, latencies []f
 			p99 = EXCLUDED.p99,
 			cv = EXCLUDED.cv;`
 
-	_, err := dbConn.Exec(context.Background(), resultQuery, subID, int(tps), p50, p90, p99, cv)
+	_, err := dbPool.Exec(context.Background(), resultQuery, subID, int(tps), p50, p90, p99, cv)
 	if err != nil {
 		return LiveMetrics{}, fmt.Errorf("DB Result write failed: %w", err)
 	}
 
 	submissionQuery := `UPDATE "Submission" SET status = 'SUCCESS' WHERE id = $1`
-	_, err = dbConn.Exec(context.Background(), submissionQuery, subID)
+	_, err = dbPool.Exec(context.Background(), submissionQuery, subID)
 	if err != nil {
 		return LiveMetrics{}, fmt.Errorf("DB Submission update failed: %w", err)
 	}
