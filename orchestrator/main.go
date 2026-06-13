@@ -363,7 +363,7 @@ func main() {
 	reader.Close()
 	fmt.Println("[Orchestrator] Sandbox image verified. Ready for execution.")
 
-	maxWorkers := 12
+	maxWorkers := 1
 	if mwStr := os.Getenv("MAX_WORKERS"); mwStr != "" {
 		if val, err := strconv.Atoi(mwStr); err == nil && val > 0 {
 			maxWorkers = val
