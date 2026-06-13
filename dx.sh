@@ -6,9 +6,6 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-ls
-pwd
-
 echo -e "${BLUE}[TradeForces DX] Initializing boot sequence...${NC}"
 
 # 1. Boot the heavy infrastructure via Docker
