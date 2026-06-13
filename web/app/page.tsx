@@ -271,6 +271,12 @@ export default function Home() {
           </p>
         </div>
         <div className="flex items-center gap-4">
+          <a
+            href="/leaderboard"
+            className="text-xs text-zinc-400 hover:text-white transition-colors uppercase tracking-wider font-mono"
+          >
+            [ View Full Leaderboard ]
+          </a>
           {session ? (
             <div className="flex items-center gap-4">
               <div className="text-right hidden md:block">
