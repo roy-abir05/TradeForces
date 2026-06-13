@@ -258,9 +258,14 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
 		select {
 		case err := <-attackDone:
 			if err != nil {
-				fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:16], entry.Name(), err)
+				if entry.Name() == "audit.yml" || entry.Name() == "audit.yaml" {
+					fmt.Printf("[Orchestrator][%s] FATAL: Wrong Answer (WA). Engine failed strict audit.\n", subID[:16])
+					o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'WA' WHERE id = $1`, subID)
+				} else {
+					fmt.Printf("[Orchestrator][%s] Load generator failed on %s: %v\n", subID[:16], entry.Name(), err)
+					o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
+				}
 				testFailed = true
-				o.dbPool.Exec(context.Background(), `UPDATE "Submission" SET status = 'FAILED' WHERE id = $1`, subID)
 			} else {
 				fmt.Printf("[Orchestrator][%s] Passed: %s\n", subID[:16], entry.Name())
 			}

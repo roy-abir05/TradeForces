@@ -9,12 +9,18 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/segmentio/kafka-go"
 )
+
+type AuditStep struct {
+    Send   string `json:"send"`
+    Expect string `json:"expect"`
+}
 
 type TelemetryRecord struct {
 	SubmissionID string `json:"submission_id"`
@@ -26,6 +32,9 @@ type TelemetryRecord struct {
 type Profile struct {
 	Name        string  `json:"name"`
 	Description string  `json:"description"`
+	AuditMode   bool        `json:"audit_mode"`      
+    TimeoutSecs int         `json:"timeout_seconds"` 
+    Sequence    []AuditStep `json:"sequence"`        
 	Phases      []Phase `json:"phases"`
 }
 
@@ -74,6 +83,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: Could not parse chaos profile: %v", err)
 	}
+
+	if currentProfile.AuditMode {
+        runAuditMode(currentProfile, submissionID)
+        return
+    }
 
 	var kafkaWriter *kafka.Writer = &kafka.Writer{
 		Addr:     kafka.TCP("localhost:9092"),
@@ -240,4 +254,47 @@ func worker(workerID int, attackTokens <-chan int, kafkaWriter *kafka.Writer, wg
 			}
 		}(jsonData, workerID)
 	}
+}
+
+func runAuditMode(profile Profile, submissionID string) {
+    targetPort := os.Getenv("TARGET_PORT")
+    if targetPort == "" {
+        targetPort = "1337"
+    }
+
+    conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%s", targetPort), 5*time.Second)
+    if err != nil {
+        fmt.Printf("[Load Generator] FATAL: Audit could not connect to engine: %v\n", err)
+        os.Exit(42)
+    }
+    defer conn.Close()
+
+    reader := bufio.NewReader(conn)
+
+    for i, step := range profile.Sequence {
+
+        fmt.Fprint(conn, step.Send)
+        timeout := profile.TimeoutSecs
+        if timeout == 0 {
+            timeout = 5
+        }
+        conn.SetReadDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
+
+        response, err := reader.ReadString('\n')
+        if err != nil {
+            fmt.Printf("[Load Generator] FATAL: Audit failed on Step %d. Expected: '%s' | Error: %v\n", i+1, strings.TrimSpace(step.Expect), err)
+            os.Exit(42)
+        }
+
+        expectedClean := strings.TrimSpace(step.Expect)
+        actualClean := strings.TrimSpace(response)
+
+        if expectedClean != actualClean {
+            fmt.Printf("[Load Generator] FATAL: Wrong Answer (WA) on Step %d.\nSent: %sExpected: '%s'\nActual:   '%s'\n", i+1, step.Send, expectedClean, actualClean)
+            os.Exit(42)
+        }
+    }
+
+    fmt.Println("[Load Generator] Audit Mode complete. Engine is deterministic and correct.")
+    os.Exit(0) 
 }
