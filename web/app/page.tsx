@@ -635,7 +635,7 @@ Can your engine survive the onslaught?`;
     setTimeout(() => setCopied(false), 2000); // Reset after 2 seconds
   };
 
-  const isFailed = ["FAILED", "MLE", "TLE", "RE"].includes(sub.status);
+  const isFailed = ["FAILED", "MLE", "TLE", "RE", "WA"].includes(sub.status);
 
   return (
     <div className="flex flex-col p-3 rounded-sm border border-zinc-800/50 bg-black hover:border-zinc-700 transition-colors gap-2">
@@ -678,11 +678,26 @@ Can your engine survive the onslaught?`;
             </button>
           ) : isFailed ? (
             <button
-              onClick={() =>
-                alert(
-                  "Mock Sandbox Logs:\n[FATAL] Container crashed.\n[ERROR] Worker connection dropped. Mutex panic on LOB insertion.",
-                )
-              }
+              onClick={() => {
+                // NEW: Context-Aware Log Routing
+                if (sub.status === "WA") {
+                  alert(
+                    "❌ MOCK SANDBOX LOGS:\n\n[FATAL] Correctness Violation.\n[ERROR] Engine failed deterministic order book audit.\nExpected strict Price-Time Priority fill sequence, received incorrect payload.",
+                  );
+                } else if (sub.status === "MLE") {
+                  alert(
+                    "⚠️ MOCK SANDBOX LOGS:\n\n[FATAL] Container crashed (Exit Code 137).\n[ERROR] Memory Limit Exceeded. Your engine leaked beyond the 512MB limit.",
+                  );
+                } else if (sub.status === "TLE") {
+                  alert(
+                    "⏱️ MOCK SANDBOX LOGS:\n\n[FATAL] Worker execution halted.\n[ERROR] Time Limit Exceeded. Engine froze or failed to process the load generator queue within the 5-minute absolute threshold.",
+                  );
+                } else {
+                  alert(
+                    "💥 MOCK SANDBOX LOGS:\n\n[FATAL] Process Terminated.\n[ERROR] Socket closed unexpectedly or segmentation fault occurred during execution.",
+                  );
+                }
+              }}
               className="text-[10px] uppercase tracking-widest font-bold px-3 py-1.5 bg-rose-950/20 hover:bg-rose-900/40 text-rose-400 border border-rose-900/30 rounded-sm transition-colors"
             >
               VIEW LOGS
