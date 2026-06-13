@@ -140,9 +140,9 @@ func (o *Orchestrator) processSubmission(payload DeployPayload) {
                 }
             ]
         },
-        "NanoCPUs": 500000000,
-        "Memory": 134217728,
-        "MemorySwap": 134217728
+        "CpusetCpus": "4-7",
+        "Memory": 536870912,
+        "MemorySwap": 536870912
     }`, hostPath, containerPath, hostPort))
 
 	var sandboxConfig container.HostConfig
