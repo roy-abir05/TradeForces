@@ -12,6 +12,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import DocsModal from "@/components/DocsModal";
 
 interface LeaderboardEntry {
   id: string;
@@ -271,6 +272,7 @@ export default function Home() {
           </p>
         </div>
         <div className="flex items-center gap-4">
+          <DocsModal />
           <a
             href="/leaderboard"
             className="text-xs text-zinc-400 hover:text-white transition-colors uppercase tracking-wider font-mono"
