@@ -1,0 +1,15 @@
+name: "Deterministic Audit"
+description: "Strict correctness check. Fails on WA."
+audit_mode: true
+timeout_seconds: 5
+sequence:
+  - send: "BUY 100 10.00\n"
+    expect: "ACK\n"
+  - send: "BUY 50 9.00\n"
+    expect: "ACK\n"
+  - send: "SELL 100 11.00\n"
+    expect: "ACK\n"
+  - send: "SELL 40 10.00\n"
+    expect: "FILL 40 10.00\n"
+  - send: "SELL 100 9.00\n"
+    expect: "FILL 60 10.00, FILL 40 9.00\n"
