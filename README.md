@@ -1,156 +1,162 @@
 # TradeForces
 
-> A Distributed Online Judge and Remote Code Execution Environment for High-Frequency Trading Engines.
+> Deterministic Benchmarking Platform for High-Frequency Trading Infrastructure.
 
-TradeForces is a specialized Online Judge built for the IICPC Summer Trading Hackathon. While traditional competitive programming platforms evaluate algorithms for basic time and space complexity, TradeForces is designed to evaluate distributed system limits, lock-free concurrency, and deterministic latency under extreme network load.
+TradeForces is a distributed benchmarking platform built for the IICPC Summer Trading Hackathon. Unlike traditional online judges that evaluate static algorithmic complexity, TradeForces evaluates compiled C++ matching engines under realistic network load, measuring throughput, latency, and stability characteristics of low-latency trading infrastructure.
 
-It provides an isolated Remote Code Execution (RCE) sandbox to benchmark C++ matching engines, streaming microsecond-level telemetry to calculate an Exchange Reliability Score.
+The platform follows a simple philosophy:
 
-## System Architecture
+**Benchmarking trading systems is fundamentally a measurement problem, not a load-generation problem.**
 
-The platform is divided into four primary microservices, built using Next.js, Go, and Kafka (Redpanda).
+To ensure fair and reproducible results, TradeForces separates orchestration from execution and utilizes a Execution Airlock that provides deterministic benchmark isolation.
 
-### 1. API Gateway & UI (`web`)
+## Architecture Overview
 
-Built with **Next.js**, **Prisma**, and **PostgreSQL**. It serves as the primary gateway for users to submit their C++ code. It manages the PostgreSQL database state (PENDING, SUCCESS, MLE, TLE, RE) and hosts the live telemetry dashboard.
+TradeForces is divided into two logical planes:
 
-### 2. The Orchestrator (`orchestrator`)
+### Control Plane
 
-A **Go** service utilizing the Docker API SDK. It acts as the RCE lifecycle manager and resource observer.
+Responsible for orchestration, persistence, and telemetry aggregation.
 
-- **Sandboxing:** Compiles user submissions (`g++ -O3`) inside an isolated Docker bridge network.
-- **Resource Limits:** Enforces strict `cgroup` limitations (128MB Memory, 128MB MemorySwap) to prevent OS thrashing.
-- **Event-Driven Observer:** Monitors container exit codes to accurately report competitive programming verdicts:
-  - `MLE` (Memory Limit Exceeded): Caught via Docker OOM Killer (Exit Code 137).
-  - `RE` (Runtime Error): Caught via unhandled exceptions/segfaults.
-  - `TLE` (Time Limit Exceeded): Caught via a strict 60-second execution timeout.
+Components:
 
-### 3. Load Generator (`load-generator`)
+- Next.js API Gateway
+- PostgreSQL
+- Orchestrator
+- Redpanda
+- Telemetry Ingester
+- WebSocket Broadcaster
 
-A highly concurrent **Go** service deployed dynamically by the Orchestrator. It connects to the compiled C++ engine over a private Docker network, spawning hundreds of goroutine workers to flood the matching engine with TCP orders. It streams raw microsecond latency timestamps directly into a Redpanda message queue.
+### Execution Plane
 
-### 4. Telemetry Ingester (`telemetry-ingester`)
+Responsible for deterministic benchmarking.
 
-A **Go** microservice that acts as the core evaluation engine.
+Components:
 
-- **Kafka Consumer:** Consumes the raw telemetry stream from the Load Generator.
-- **Live Feed:** Calculates rolling 1-second metrics (p50, p90, p99, TPS) and broadcasts them to the Next.js frontend via WebSockets.
-- **Final Scoring:** Upon receiving an `END_OF_RUN` signal, it calculates the engine's final Exchange Reliability Score and posts the payload to the Next.js API Gateway.
+- Docker Sandbox
+- C++ Matching Engine
+- Load Generator (Bot Fleet)
+- Benchmark Profiles (`audit.yml`, `flash_crash.yml`)
 
-## The Exchange Reliability Score (ERS)
+Only a single benchmark execution is allowed at a time (`maxWorkers = 1`) to eliminate noisy-neighbor effects and ensure reproducible measurements.
 
-In high-frequency trading, median latency (p50) is a vanity metric; engines are judged on their worst-case scenarios and jitter. TradeForces scores submissions based on:
+## Benchmark Pipeline
 
-1.  **Throughput (TPS):** Total orders processed per second.
-2.  **Tail Latency (p99):** Ensuring the slowest 1% of orders remain highly performant.
-3.  **Coefficient of Variation (CV):** Calculated as the standard deviation divided by the mean ($\frac{\sigma}{\mu}$). This explicitly measures latency stability, penalizing engines that rely on unpredictable locking mechanisms instead of deterministic, lock-free data structures.
+Every submission passes through a two-phase evaluation process.
 
-## Installation & Setup
+### Phase 1: Deterministic Audit
+
+A correctness gate that verifies:
+
+- Price-Time Priority
+- Partial Fill Handling
+- Multi-Level Order Sweeps
+- Protocol Compliance
+
+Engines that fail validation immediately receive a Wrong Answer verdict.
+
+### Phase 2: Stress Benchmark
+
+Correct engines are subjected to high-volume TCP traffic generated by the Load Generator.
+
+During execution the platform streams:
+
+- Throughput (TPS)
+- p50 Latency
+- p90 Latency
+- p99 Latency
+
+into Redpanda for asynchronous aggregation and live dashboard updates.
+
+## Exchange Reliability Metrics (ERM)
+
+TradeForces evaluates engines using a multidimensional reliability profile:
+
+- **Throughput (TPS)** — Orders processed per second.
+- **Tail Latency (p99)** — Worst-case latency behavior under load.
+- **Coefficient of Variation (CV)** — Latency stability and jitter measurement.
+
+Together these metrics provide a more realistic assessment of trading infrastructure than average latency alone.
+
+## Technology Stack
+
+### Frontend
+
+- Next.js
+- TypeScript
+- Prisma
+- Tailwind CSS
+
+### Backend
+
+- Go
+- PostgreSQL
+- Redpanda
+- WebSockets
+
+### Infrastructure
+
+- Docker
+- Linux cgroups
+- Docker SDK
+- Docker Bridge Networking
+
+## Quick Start
 
 ### Prerequisites
 
 - Docker & Docker Compose
 - Go 1.21+
 - Node.js 18+
-- Redpanda (Kafka compatible broker)
+- PostgreSQL
+- Redpanda
 
-### 1. Infrastructure Setup
+### One-Command Boot
 
-Start the Redpanda broker and PostgreSQL database using Docker Compose.
-
-```bash
-docker-compose up -d
-```
-
-### 2. Start the Telemetry Ingester
+TradeForces includes a developer experience script (`dx.sh`) that boots the complete platform.
 
 ```bash
-cd telemetry-ingester
-go mod tidy
-go run main.go
+chmod +x dx.sh
+./dx.sh
 ```
 
-### 3. Start the API Gateway (Next.js)
+The script automatically:
 
-Apply database migrations and start the UI.
+- Starts PostgreSQL and Redpanda via Docker Compose
+- Boots the Telemetry Ingester
+- Boots the Go Orchestrator
+- Starts the Next.js frontend
+- Registers cleanup handlers for graceful shutdown
 
-```bash
-cd web
-npm install
-npx prisma db push
-npm run dev
+Available endpoints:
+
+- UI: http://localhost:3000
+- Grafana: http://localhost:3001
+- WebSocket: ws://localhost:8081/ws
+
+Press `Ctrl+C` at any time to safely terminate all services and tear down infrastructure.
+
+## Repository Structure
+
+```text
+.
+├── web/
+├── orchestrator/
+├── telemetry-ingester/
+├── load-generator/
+├── benchmarks/
+├── docker-compose.yml
+└── dx.sh
 ```
 
-### 4. Start the Orchestrator
-
-Ensure the Docker daemon is running, as the Orchestrator requires API access to spin up the RCE sandboxes.
-
-```bash
-cd orchestrator
-go mod tidy
-go run main.go
-```
-
-## Testing the Evaluation Pipeline
-
-Users can submit code through the Next.js frontend running at `http://localhost:3000`.
-
-To verify the Observer's strict resource monitoring, the following minimal C++ submissions will trigger specific verdicts:
-
-**Triggering TLE (Time Limit Exceeded):**
-
-```C++
-#include <sys/socket.h>
-#include <netinet/in.h>
-
-int main() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in address;
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(1337);
-    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
-    listen(server_fd, 3);
-
-    while(true) {} // Infinite loop triggers 60s timeout
-    return 0;
-}
-```
-
-**Triggering MLE (Memory Limit Exceeded):**
-
-```C++
-#include <sys/socket.h>
-#include <netinet/in.h>
-
-int main() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in address;
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(1337);
-    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
-    listen(server_fd, 3);
-
-    while(true) {
-        // volatile prevents GCC -O3 from optimizing the unread memory leak
-        volatile char* p = new char[100000];
-        for(int i = 0; i < 100000; i += 4096) {
-            p[i] = 'X';
-        }
-    }
-    return 0;
-}
-```
-
-## Hackathon Submission Details
+## Hackathon Submission
 
 **Event:** IICPC Summer Trading Hackathon
 
-<!--
-**Team:** [Your Team Name]
+**Author:** Abir Roy
 
-**Documentation:** [Link to Google Drive Design Document]
+**Submission Type:** Solo Submission
 
-**Video Demo:** [Link to YouTube/Drive Video]
--->
+- [Documentation](https://drive.google.com/file/d/143ABgwdczGDM6RYj-R1fBO22EQcM9AOl/view?usp=drive_link)
+
+- [Video Demo](https://drive.google.com/file/d/11RmCtqQvB0bE9sslgcKu51Ets6GjGQwo/view?usp=drive_link)
